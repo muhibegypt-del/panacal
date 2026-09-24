@@ -80,6 +80,10 @@ class InvalidReadingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid readings"):
             run(meter, level=10, count=1)
 
+    def test_slightly_negative_black_is_accepted_as_zero(self):
+        row, _, _ = run(ScriptedMeter([XYZ(-0.001, -0.002, -0.001)]), level=0)
+        self.assertEqual(row.xyz.Y, 0)
+
     def test_zero_black_is_reported_as_neutral(self):
         row, _, _ = run(ScriptedMeter([XYZ(0, 0, 0)]), level=0)
         self.assertEqual(row.xyz.Y, 0)

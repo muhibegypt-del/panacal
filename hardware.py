@@ -596,6 +596,9 @@ def measure(pattern: PatternHost, meter: Meter, log: Transcript, level: int,
         while len(readings) < count:
             log.write(f"MEASURE stage={stage} level={level}% read={len(readings) + 1}/{count}")
             xyz = read_meter(meter, log)
+            if level == 0 and all(math.isfinite(value) for value in xyz.as_tuple()):
+                # Near its floor the meter can report black slightly below zero.
+                xyz = XYZ(max(0.0, xyz.X), max(0.0, xyz.Y), max(0.0, xyz.Z))
             reason = invalid_reading(xyz, level)
             if not reason:
                 readings.append(xyz)
