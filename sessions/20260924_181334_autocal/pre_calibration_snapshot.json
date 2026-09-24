@@ -1,0 +1,84 @@
+{
+  "model": "TX-P50VT60",
+  "picture": {
+    "PC:BRI": 0,
+    "PC:CON": 60,
+    "PC:COL": 50,
+    "PC:TIN": 0,
+    "PC:SHP": 50,
+    "PC:TMP": "WRM2",
+    "PC:GMM": "2.2",
+    "PC:PBR": "Low",
+    "PC:CGU": "REC"
+  },
+  "two_point": {
+    "WB:HIR": 0,
+    "WB:HIG": 0,
+    "WB:HIB": 0,
+    "WB:LOR": 0,
+    "WB:LOG": 0,
+    "WB:LOB": 0
+  },
+  "detail": {
+    "10": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    },
+    "20": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    },
+    "30": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    },
+    "40": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    },
+    "50": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    },
+    "60": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    },
+    "70": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    },
+    "80": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    },
+    "90": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    },
+    "100": {
+      "WB:GNR": 0,
+      "WB:GNG": 0,
+      "WB:GNB": 0,
+      "PC:GGN": 0
+    }
+  }
+}

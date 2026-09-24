@@ -1,0 +1,37 @@
+18:20:28 METER starting persistent Argyll session: C:\Argyll\Argyll_V3.3.0\bin\spotread.exe -e -X C:\ProgramData\ArgyllCMS\PlasmaFamily_20Jul12.ccss -Y R:60
+18:20:35 METER | Place instrument on spot to be measured,
+18:20:35 METER | and hit [A-Z] to read white and setup FWA compensation (keyed to letter)
+18:20:35 METER | [a-z] to read and make FWA compensated reading from keyed reference
+18:20:35 METER | 'r' to set reference, 's' to save spectrum,
+18:20:35 METER | 'f' to report cal. refresh rate, 'F' to measure refresh rate
+18:20:35 METER | 'h' to toggle high res., 'k' to do a calibration
+18:20:35 METER | Hit ESC or Q to exit, any other key to take a reading:
+18:20:35 METER READY persistent session
+18:20:55 METER | Result is XYZ: 0.040273 0.055806 0.088673, D50 Lab: 0.504095 -0.546581 -0.804993
+18:20:55 METER | Place instrument on spot to be measured,
+18:20:55 METER | and hit [A-Z] to read white and setup FWA compensation (keyed to letter)
+18:20:55 METER | [a-z] to read and make FWA compensated reading from keyed reference
+18:20:55 METER | 'r' to set reference, 's' to save spectrum,
+18:20:55 METER | 'f' to report cal. refresh rate, 'F' to measure refresh rate
+18:20:55 METER | 'h' to toggle high res., 'k' to do a calibration
+18:20:55 METER | Hit ESC or Q to exit, any other key to take a reading:
+18:20:55 LIVE TRANSPORT {"read": 1, "xyz": [0.040273, 0.055806, 0.088673], "seconds": 19.516}
+18:21:14 METER | Result is XYZ: 0.043723 0.055939 0.088156, D50 Lab: 0.505293 -0.412409 -0.793172
+18:21:14 METER | Place instrument on spot to be measured,
+18:21:14 METER | and hit [A-Z] to read white and setup FWA compensation (keyed to letter)
+18:21:14 METER | [a-z] to read and make FWA compensated reading from keyed reference
+18:21:14 METER | 'r' to set reference, 's' to save spectrum,
+18:21:14 METER | 'f' to report cal. refresh rate, 'F' to measure refresh rate
+18:21:14 METER | 'h' to toggle high res., 'k' to do a calibration
+18:21:14 METER | Hit ESC or Q to exit, any other key to take a reading:
+18:21:14 LIVE TRANSPORT {"read": 2, "xyz": [0.043723, 0.055939, 0.088156], "seconds": 19.5}
+18:21:34 METER | Result is XYZ: 0.043748 0.055952 0.087776, D50 Lab: 0.505415 -0.411953 -0.785787
+18:21:34 METER | Place instrument on spot to be measured,
+18:21:34 METER | and hit [A-Z] to read white and setup FWA compensation (keyed to letter)
+18:21:34 METER | [a-z] to read and make FWA compensated reading from keyed reference
+18:21:34 METER | 'r' to set reference, 's' to save spectrum,
+18:21:34 METER | 'f' to report cal. refresh rate, 'F' to measure refresh rate
+18:21:34 METER | 'h' to toggle high res., 'k' to do a calibration
+18:21:34 METER | Hit ESC or Q to exit, any other key to take a reading:
+18:21:34 LIVE TRANSPORT {"read": 3, "xyz": [0.043748, 0.055952, 0.087776], "seconds": 19.516}
+18:21:36 EVIDENCE C:\Users\Muhib\Documents\Codex\2026-09-06\hi\outputs\panasonic_grayscale_autocal_v4\sessions\20260924_182028_meter_transport_check

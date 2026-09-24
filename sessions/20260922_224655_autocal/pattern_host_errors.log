@@ -1,0 +1,7 @@
+Expected exactly one secondary screen; found 0.
+At C:\Users\Muhib\Documents\Codex\2026-09-06\hi\outputs\panasonic_grayscale_autocal_v4\pattern_host.ps1:23 char:5
++     throw "Expected exactly one secondary screen; found $($target.Cou ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (Expected exactl...creen; found 0.:String) [], RuntimeException
+    + FullyQualifiedErrorId : Expected exactly one secondary screen; found 0.
+ 
