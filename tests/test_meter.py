@@ -118,7 +118,6 @@ class SetupOrderTests(unittest.TestCase):
                 open_hardware(ROOT, Log(), config, "unused", Path("spotread.exe"), prepare=True)
         tv.snapshot.assert_not_called()
         tv.apply_picture.assert_not_called()
-        tv.reset_calibration.assert_not_called()
         pattern.linearize_video_lut.assert_not_called()
         tv.close.assert_called_once()
         pattern.close.assert_called_once()
@@ -132,7 +131,6 @@ class SetupOrderTests(unittest.TestCase):
             return meter
         pattern.linearize_video_lut.side_effect = lambda *_: events.append("lut")
         tv.apply_picture.side_effect = lambda *_: events.append("picture")
-        tv.reset_calibration.side_effect = lambda: events.append("reset")
         tv.snapshot.return_value = {
             "picture": {"PC:BRI": -5, "PC:CON": 48, "PC:TMP": "WRM2", "PC:GMM": "2.2"},
             "two_point": {"WB:HIR": 8},
@@ -146,7 +144,6 @@ class SetupOrderTests(unittest.TestCase):
         self.assertIs(actual[2], meter)
         self.assertEqual(events, ["ready", "lut"])
         tv.apply_picture.assert_not_called()
-        tv.reset_calibration.assert_not_called()
         tv.snapshot.assert_called_once()
         self.assertIs(actual[3], tv.snapshot.return_value)
         pattern.start.assert_called_once_with(100)

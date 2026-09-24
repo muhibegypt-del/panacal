@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from autocal import AutoCal, load_config, summarise_sweep
-from colour import D65_UV, D65_XYZ, power_target_y
+from colour import D65_UV, power_target_y
 from domain import XYZ
 
 
@@ -135,7 +135,6 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         self.assertNotIn("baseline", result)
         self.assertNotIn("baseline_summary", result)
         after = result["final_summary"]
-        self.assertTrue(result["stages"]["white_balance_slot100_mapping"]["confirmed_95_dominant"])
         self.assertLess(after["average_chroma_delta_e_2000"],
                         before["average_chroma_delta_e_2000"])
         self.assertLess(after["maximum_chroma_delta_e_2000"],
@@ -196,7 +195,7 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         autocal.read = record
         history = autocal.optimise_white_balance(
             "two_point_high", 100, [60, 80, 100], ("WB:HIR", "WB:HIB"),
-            None, cap=4, iterations=2, direct=True, initial_primary=white,
+            None, cap=4, iterations=2, initial_primary=white,
         )
         self.assertEqual(len(history), 2)
         self.assertTrue(history[0]["accepted"])
@@ -230,7 +229,7 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         autocal.read = worsen_guard
         history = autocal.optimise_white_balance(
             "two_point_high", 100, [60, 80, 100], ("WB:HIR", "WB:HIB"),
-            None, cap=4, iterations=1, direct=True, initial_primary=white,
+            None, cap=4, iterations=1, initial_primary=white,
         )
         self.assertFalse(history[0]["accepted"])
         self.assertEqual(tv.two, original)

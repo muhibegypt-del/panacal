@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import sys
 import unittest
 from pathlib import Path
@@ -106,7 +105,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertNotIn("required_picture", config["tv"])
         self.assertNotIn("reset_calibration_controls", config["tv"])
         self.assertEqual(config["pattern"]["window_area"], 0.065)
-        self.assertEqual(config["pattern"]["settle_seconds"], 2.0)
+        self.assertEqual(config["pattern"]["settle_seconds"], 0.5)
         self.assertEqual(config["pattern"]["range"], "full")
         self.assertIn("PlasmaFamily_20Jul12.ccss", config["meter"]["correction_file"])
         self.assertIn("-X", config["meter"]["args"])

@@ -11,7 +11,7 @@ import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-from colour import D65_UV, evaluate, metrics
+from colour import D65_UV, evaluate, metrics, xyz_to_uv
 from domain import Evaluation, Measurement
 from hardware import Meter, PatternHost, TVSession, Transcript, measure
 from solver import UnusableResponse, propose_red_blue, white_balance_improved
@@ -23,6 +23,9 @@ CONFIG_PATH = HERE / "config.json"
 # corrected. Slot 100 acts on the 95% patch; 100% is set by two-point high.
 MEASURE_LEVELS = (0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100)
 DETAIL_SLOTS = tuple(range(10, 101, 10))
+# Measured on this VT60 (session 20260924_185416): slot 100 moves the 95%
+# patch 3.2x more than 100% for white balance, so it is corrected at 95%.
+SLOT_PATCH = {100: 95}
 
 
 def json_default(value):
@@ -184,22 +187,21 @@ class AutoCal:
 
     def optimise_white_balance(self, label: str, primary: int, affected: list[int],
                                codes: tuple[str, str], slot: int | None,
-                               cap: int, iterations: int, *, direct: bool = False,
+                               cap: int, iterations: int, *,
                                initial_primary: Measurement | None = None) -> list[dict]:
+        """Correct one red/blue pair at `primary`, guarding the `affected` levels.
+
+        Readings at unchanged controls are reused: the last restored probe is
+        the reference, and an accepted candidate starts the next iteration.
+        """
         history = []
         if initial_primary is not None and initial_primary.level != primary:
             raise ValueError("Initial measurement does not match the correction level")
         reusable_primary = initial_primary
         for iteration in range(1, iterations + 1):
             current = self._read_controls(codes, slot)
-            if direct:
-                # Start the response measurement at the point being corrected.
-                # A just-accepted reading is still valid at unchanged controls.
-                point = reusable_primary or self.read(primary, f"{label}_before_{iteration}", fast=True)
-                initial_rows = [point]
-                reusable_primary = None
-            else:
-                initial_rows = self.read_levels(affected, f"{label}_before_{iteration}")
+            initial_rows = [reusable_primary or self.read(primary, f"{label}_before_{iteration}")]
+            reusable_primary = None
             initial_score = self.score(initial_rows)
             if initial_score.chroma_score <= float(self.solver_config["white_balance_stop_delta_e"]):
                 history.append({"iteration": iteration, "accepted": False,
@@ -207,8 +209,7 @@ class AutoCal:
                                 "measurements": initial_rows, "score": initial_score})
                 break
 
-            initial_by_level = {row.level: row for row in initial_rows}
-            rolling = initial_by_level[primary]
+            rolling = initial_rows[0]
             columns = []
             responses = []
             for code in codes:
@@ -218,16 +219,13 @@ class AutoCal:
                 columns.append(column)
                 responses.append(evidence)
 
-            if direct:
-                # Both response probes have been restored. Their last primary
-                # reading is already our reference; only read the other guards.
-                reference_rows = [
-                    rolling if level == primary else
-                    self.read(level, f"{label}_reference_{iteration}", fast=True)
-                    for level in sorted(set(affected))
-                ]
-            else:
-                reference_rows = self.read_levels(affected, f"{label}_reference_{iteration}")
+            # Both probes have been restored, so the last primary reading is
+            # already the reference; only the other guard levels are read.
+            reference_rows = [
+                rolling if level == primary else
+                self.read(level, f"{label}_reference_{iteration}", fast=True)
+                for level in sorted(set(affected))
+            ]
             reference_score = self.score(reference_rows)
             reference = {row.level: row for row in reference_rows}[primary]
             try:
@@ -280,53 +278,8 @@ class AutoCal:
             })
             if not accepted:
                 break
-            if direct:
-                reusable_primary = next(row for row in candidate_rows if row.level == primary)
+            reusable_primary = next(row for row in candidate_rows if row.level == primary)
         return history
-
-    def verify_slot_100_mapping(self, code: str, family: str) -> dict:
-        """Prove whether the TV's nominal slot 100 controls the 95% patch."""
-        slot = 100
-        self.tv.select_point(slot)
-        original = self.tv.get_number(code)
-        step_size = int(self.solver_config["response_step_rgb"])
-        trial = original + step_size if original <= 50 - step_size else original - step_size
-        step = trial - original
-        before95 = self.read(95, f"{family}_slot100_map_95_before", fast=True)
-        before100 = self.read(100, f"{family}_slot100_map_100_before", fast=True)
-        self.tv.select_point(slot)
-        self.tv.set_number(code, trial)
-        changed95 = self.read(95, f"{family}_slot100_map_95_changed", fast=True)
-        changed100 = self.read(100, f"{family}_slot100_map_100_changed", fast=True)
-        self.tv.select_point(slot)
-        self.tv.set_number(code, original)
-        restored95 = self.read(95, f"{family}_slot100_map_95_restored", fast=True)
-        restored100 = self.read(100, f"{family}_slot100_map_100_restored", fast=True)
-
-        def effect(before: Measurement, changed: Measurement, restored: Measurement) -> float:
-            reference_u = (before.u + restored.u) / 2.0
-            reference_v = (before.v + restored.v) / 2.0
-            return math.hypot(changed.u - reference_u, changed.v - reference_v) / abs(step)
-
-        effect95 = effect(before95, changed95, restored95)
-        effect100 = effect(before100, changed100, restored100)
-        noise_floor = 0.00002
-        confirmed = effect95 > max(noise_floor, effect100 * 1.15)
-        result = {
-            "family": family,
-            "control": code,
-            "confirmed_95_dominant": confirmed,
-            "original": original,
-            "trial": trial,
-            "effect_per_step_95": effect95,
-            "effect_per_step_100": effect100,
-            "measurements": [before95, before100, changed95, changed100, restored95, restored100],
-        }
-        self.log.write(
-            f"SLOT100 MAP family={family} code={code} "
-            f"95effect={effect95:.6f} 100effect={effect100:.6f} confirmed={confirmed}"
-        )
-        return result
 
     def run(self) -> dict:
         result = {"version": 4, "workflow": "direct_two_point", "stages": {}}
@@ -342,29 +295,23 @@ class AutoCal:
         two_iterations = int(self.solver_config["two_point_iterations"])
         result["stages"]["two_point_high"] = self.optimise_white_balance(
             "two_point_high", 100, [60, 80, 100], ("WB:HIR", "WB:HIB"),
-            None, cap=4, iterations=two_iterations, direct=True, initial_primary=white,
+            None, cap=4, iterations=two_iterations, initial_primary=white,
         )
         self.log.write("TWO-POINT LOW: measuring and correcting 10%")
         result["stages"]["two_point_low"] = self.optimise_white_balance(
             "two_point_low", 10, [10, 20, 30], ("WB:LOR", "WB:LOB"),
-            None, cap=3, iterations=two_iterations, direct=True,
+            None, cap=3, iterations=two_iterations,
         )
 
-        wb_slot100 = self.verify_slot_100_mapping("WB:GNR", "white_balance")
-        result["stages"]["white_balance_slot100_mapping"] = wb_slot100
         detail_iterations = int(self.solver_config["detail_iterations"])
         detail_results = []
         for slot in DETAIL_SLOTS:
-            if slot == 100 and not wb_slot100["confirmed_95_dominant"]:
-                detail_results.append({"slot": slot, "skipped": "95_mapping_not_confirmed"})
-                continue
-            primary = 95 if slot == 100 else slot
-            affected = [primary]
+            primary = SLOT_PATCH.get(slot, slot)
             detail_results.append({
                 "slot": slot,
                 "primary": primary,
                 "history": self.optimise_white_balance(
-                    f"detail_{slot}", primary, affected, ("WB:GNR", "WB:GNB"),
+                    f"detail_{slot}", primary, [primary], ("WB:GNR", "WB:GNB"),
                     slot, cap=4 if slot > 10 else 5, iterations=detail_iterations,
                 ),
             })
@@ -496,6 +443,16 @@ def close_hardware(pattern, tv, meter, log) -> None:
                 pass
 
 
+def ask_connection(config: dict) -> tuple[str, Path]:
+    ip = input(f"TV IP [{config['tv']['default_ip']}]: ").strip() or config["tv"]["default_ip"]
+    default_meter = config["meter"]["default_executable"]
+    meter_text = input(f"spotread.exe [{default_meter}]: ").strip()
+    meter_path = Path(meter_text or default_meter)
+    if not meter_path.is_file():
+        raise RuntimeError(f"spotread.exe not found: {meter_path}")
+    return ip, meter_path
+
+
 def run_autocal() -> int:
     config = load_config()
     session = new_session("autocal")
@@ -511,12 +468,7 @@ def run_autocal() -> int:
         print("No opening grayscale sweep. Detailed calibration and final verification follow.")
         print("Arm ISFccc Network at Waiting for Connection.")
         input("Press Enter when the TV is armed; place the Spyder5 after the centre patch appears...")
-        ip = input(f"TV IP [{config['tv']['default_ip']}]: ").strip() or config["tv"]["default_ip"]
-        default_meter = config["meter"]["default_executable"]
-        meter_text = input(f"spotread.exe [{default_meter}]: ").strip()
-        meter_path = Path(meter_text or default_meter)
-        if not meter_path.is_file():
-            raise RuntimeError(f"spotread.exe not found: {meter_path}")
+        ip, meter_path = ask_connection(config)
         pattern, tv, meter, original = open_hardware(
             session, log, config, ip, meter_path, prepare=True
         )
@@ -563,12 +515,7 @@ def run_verification() -> int:
         print("\nPANASONIC GT60/VT60 READ-ONLY VERIFICATION V4")
         print("Arm ISFccc Network at Waiting for Connection. No calibration values will be written.")
         input("Press Enter when the TV is armed; place the Spyder5 after the centre patch appears...")
-        ip = input(f"TV IP [{config['tv']['default_ip']}]: ").strip() or config["tv"]["default_ip"]
-        default_meter = config["meter"]["default_executable"]
-        meter_text = input(f"spotread.exe [{default_meter}]: ").strip()
-        meter_path = Path(meter_text or default_meter)
-        if not meter_path.is_file():
-            raise RuntimeError(f"spotread.exe not found: {meter_path}")
+        ip, meter_path = ask_connection(config)
         pattern, tv, meter, snapshot = open_hardware(session, log, config, ip, meter_path)
         save_json(session / "tv_snapshot.json", snapshot)
         save_json(session / "effective_config.json", config)
@@ -594,11 +541,104 @@ def run_verification() -> int:
         close_hardware(pattern, tv, meter, log)
 
 
+def measure_settle(pattern, meter, tv, log, delays=(0.25, 0.5, 1.0),
+                   repeats: int = 2, sleep=time.sleep) -> dict:
+    """Find the shortest wait after a patch or TV control change that still
+    gives a settled reading. Compares against a fully settled 100% white."""
+    def uv_y(xyz) -> tuple[float, float, float]:
+        u, v = xyz_to_uv(xyz)
+        return u, v, xyz.Y
+
+    pattern.show(100)
+    sleep(3.0)
+    reference = [uv_y(meter.read()) for _ in range(3)]
+    ref_u = statistics.median(row[0] for row in reference)
+    ref_v = statistics.median(row[1] for row in reference)
+    ref_y = statistics.median(row[2] for row in reference)
+    noise_uv = max(math.hypot(u - ref_u, v - ref_v) for u, v, _ in reference)
+    noise_y = max(abs(y - ref_y) / ref_y for _, _, y in reference)
+    # Allow for plasma drift over the test; a late start to the Spyder
+    # integration shows up as several percent of missing luminance.
+    tolerance_uv = max(3 * noise_uv, 0.0005)
+    tolerance_y = max(3 * noise_y, 0.01)
+
+    def check(kind: str, delay: float, xyz) -> dict:
+        u, v, y = uv_y(xyz)
+        error_uv = math.hypot(u - ref_u, v - ref_v)
+        error_y = abs(y - ref_y) / ref_y
+        ok = error_uv <= tolerance_uv and error_y <= tolerance_y
+        log.write(f"SETTLE {kind} delay={delay:.2f}s dY={error_y:.2%} duv={error_uv:.5f} "
+                  f"{'OK' if ok else 'UNSETTLED'}")
+        return {"kind": kind, "delay": delay, "error_y": error_y,
+                "error_uv": error_uv, "settled": ok}
+
+    trials = []
+    for delay in delays:
+        for _ in range(repeats):
+            pattern.show(0)
+            sleep(1.0)
+            pattern.show(100)
+            sleep(delay)
+            trials.append(check("patch", delay, meter.read()))
+
+    code = "WB:HIR"
+    original = tv.get_number(code)
+    changed = original + 6 if original <= 44 else original - 6
+    try:
+        for delay in delays:
+            for _ in range(repeats):
+                tv.set_number(code, changed)
+                sleep(1.0)
+                tv.set_number(code, original)
+                sleep(delay)
+                trials.append(check("control", delay, meter.read()))
+    finally:
+        tv.set_number(code, original)
+
+    settled = [delay for delay in delays
+               if all(trial["settled"] for trial in trials if trial["delay"] >= delay)]
+    recommended = min(settled) if settled else 2.0
+    return {"reference_noise_uv": noise_uv, "reference_noise_y": noise_y,
+            "tolerance_uv": tolerance_uv, "tolerance_y": tolerance_y,
+            "trials": trials, "recommended_settle_seconds": recommended}
+
+
+def run_settle_test() -> int:
+    config = load_config()
+    session = new_session("settle")
+    log = Transcript(session / "settle.log")
+    pattern = tv = meter = None
+    try:
+        validate_meter_configuration(config)
+        print("\nPANASONIC SETTLE-TIME TEST")
+        print("Measures how soon a reading is stable after a patch or TV control change.")
+        print("It toggles two-point high red by 6 steps and always puts it back.")
+        input("Press Enter when the TV is armed; place the Spyder5 after the centre patch appears...")
+        ip, meter_path = ask_connection(config)
+        pattern, tv, meter, snapshot = open_hardware(session, log, config, ip, meter_path)
+        save_json(session / "tv_snapshot.json", snapshot)
+        result = measure_settle(pattern, meter, tv, log)
+        save_json(session / "settle_result.json", result)
+        current = float(config["pattern"]["settle_seconds"])
+        print(f"\nRecommended settle_seconds: {result['recommended_settle_seconds']} "
+              f"(config.json currently {current})")
+        print("Results:", session)
+        return 0
+    except Exception as exc:
+        log.write("SETTLE TEST FAILED " + repr(exc))
+        print("\nSETTLE TEST FAILED:", exc)
+        print("Evidence:", session)
+        return 1
+    finally:
+        close_hardware(pattern, tv, meter, log)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("run", "verify"), nargs="?", default="run")
+    parser.add_argument("mode", choices=("run", "verify", "settle"), nargs="?", default="run")
     args = parser.parse_args()
-    return run_autocal() if args.mode == "run" else run_verification()
+    return {"run": run_autocal, "verify": run_verification,
+            "settle": run_settle_test}[args.mode]()
 
 
 if __name__ == "__main__":

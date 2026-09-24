@@ -83,13 +83,13 @@ function Write-Status([int]$sequence) {
 }
 
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 50
+# WinForms timers resolve to roughly one 15 ms system tick.
+$timer.Interval = 15
 $timer.Add_Tick({
     try {
         if (-not (Test-Path -LiteralPath $ControlFile)) { return }
         $next = Get-Content -Raw -LiteralPath $ControlFile | ConvertFrom-Json
         if ([int]$next.sequence -eq [int]$script:state.sequence) { return }
-        $script:state.sequence = [int]$next.sequence
         $script:state.stimulus = [int]$next.stimulus
         $script:state.range = [string]$next.range
         if ($null -ne $next.window_area) {
@@ -103,9 +103,13 @@ $timer.Add_Tick({
         }
         $form.Invalidate()
         $form.Update()
-        Write-Status $script:state.sequence
+        Write-Status ([int]$next.sequence)
+        # Only mark the command done once its acknowledgement is written. If
+        # the controller was reading the status file and the move failed, the
+        # next tick repaints the same patch and retries the acknowledgement.
+        $script:state.sequence = [int]$next.sequence
     } catch {
-        # A command file may be between atomic replacements; retry on the next tick.
+        # A command or status file may be mid-replacement; retry on the next tick.
     }
 })
 

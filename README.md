@@ -24,9 +24,9 @@ V4 starts from your current settings in the configured ISF Day mode:
 5. Corrects the low end at 10%, then continues with the 10-point white balance.
 6. Runs one verification sweep at the end (0%, the ten control points 10–90% and 95%, and 100%) and checks measured black/shadow/headroom symptoms.
 
-There is no opening 0-100% sweep and no separate discarded meter-check reading. Two-point correction reuses the first white reading, the restored response measurement, and the latest accepted measurement at unchanged controls. Measurements at affected levels still check that a proposed change improves the overall result. Black is measured only by the final verification sweep.
+There is no opening 0-100% sweep and no separate discarded meter-check reading. Every stage reuses readings taken at unchanged controls: the first white reading, the last restored probe reading as the reference, and the latest accepted measurement as the next starting point. Measurements at affected levels still check that a proposed change improves the overall result. Black is measured only by the final verification sweep.
 
-Measurements are taken only at levels the TV can correct. The Panasonic has a 10-point grayscale control, so 5% and the in-between 15/25/…/85% patches are never measured. Slot 100 acts on the 95% patch, so 95% is measured for that slot and 100% is set by two-point high.
+Measurements are taken only at levels the TV can correct. The Panasonic has a 10-point grayscale control, so 5% and the in-between 15/25/…/85% patches are never measured. Slot 100 acts on the 95% patch (measured on this VT60: 3.2× more effect at 95% than at 100%), so it is corrected at 95% and 100% is set by two-point high. This mapping is fixed rather than re-probed every run.
 
 Each control receives up to four bounded correction attempts, but stops early as soon as it reaches target or stops improving. Every proposed change is measured before it is accepted. A rejected change is immediately restored. If any setup or calibration stage fails, V4 restores the complete original TV snapshot and the saved Panasonic video LUT.
 
@@ -46,6 +46,10 @@ The complete evidence is saved in a timestamped folder under `sessions`:
 - `final_snapshot.json` — final controls;
 - `autocal_result.json` — starting white, response measurements, solver proposals, decisions and final sweep;
 - `effective_config.json` — exact settings used for the run.
+
+## Settle time
+
+Before each reading AutoCal waits `pattern.settle_seconds` (0.5 s) after the patch or a TV control changes. Double-click **Run Settle Test.bat** once to confirm this suits your TV and meter. The test takes about two minutes. It compares readings taken 0.25, 0.5 and 1 s after a black-to-white patch change, and after a two-point red change, with a fully settled white, then prints the shortest wait that still gave a settled reading. Put that value in `config.json`. Two-point high red is always put back.
 
 ## Verify without changing anything
 
@@ -74,4 +78,4 @@ Offline tests include real child-process fixtures for prompt fragmentation, repe
 - Argyll documents emissive XYZ measurements, Spyder5 CCSS support, and a refresh-rate override. The configured 60 Hz override assumes the source remains at 60 Hz; it is not automatic refresh detection. https://www.argyllcms.com/doc/spotread.html
 - Argyll documents prompts without newlines and the Windows single-write input requirement. https://www.argyllcms.com/doc/Environment.html
 - Socket framing, handshake, and point selectors were compared with the user's working gt60_control.py and recorded TV replies. Numeric readback now rejects a reply for a different control.
-- Window area (6.5%), settle delay (2 s), step sizes and damping remain implementation choices, not values certified by those documents. Final measurements remain necessary to judge the physical result.
+- Window area (6.5%), settle delay (0.5 s, see below), step sizes and damping remain implementation choices, not values certified by those documents. Final measurements remain necessary to judge the physical result.

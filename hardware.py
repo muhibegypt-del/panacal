@@ -29,6 +29,23 @@ PICTURE_NUMBER_RANGES = {
 }
 
 
+def replace_with_retry(source: Path, target: Path, timeout: float = 2.0) -> None:
+    """Atomically replace target, waiting out brief Windows sharing locks.
+
+    The pattern host reads the command file every tick; while it has the
+    file open Windows refuses the replace with PermissionError (WinError 5).
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.005)
+
+
 def signed_value(value: int) -> str:
     value = int(value)
     return f"{value:03d}" if value >= 0 else f"-{abs(value):02d}"
@@ -74,7 +91,7 @@ class PatternHost:
         }
         temporary = self.control.with_suffix(".tmp")
         temporary.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(temporary, self.control)
+        replace_with_retry(temporary, self.control)
 
     def start(self, stimulus: int = 50) -> None:
         self._write_command(stimulus)
@@ -193,7 +210,7 @@ class PatternHost:
                     return status
             except Exception as exc:
                 last_error = exc
-            time.sleep(0.05)
+            time.sleep(0.005)
         raise RuntimeError(f"Pattern acknowledgement timed out ({last_error}); {self.error_text()}")
 
     def error_text(self) -> str:
@@ -293,14 +310,6 @@ class TVSession:
                 self.set_number(code, int(value), low, high)
             else:
                 self.set_text(code, str(value))
-
-    def reset_calibration(self) -> None:
-        for code in ("WB:HIR", "WB:HIG", "WB:HIB", "WB:LOR", "WB:LOG", "WB:LOB"):
-            self.set_number(code, 0)
-        for level in CONTROL_LEVELS:
-            self.select_point(level)
-            for code in ("WB:GNR", "WB:GNG", "WB:GNB", "PC:GGN"):
-                self.set_number(code, 0)
 
     def select_point(self, level: int) -> None:
         if level not in CONTROL_LEVELS:

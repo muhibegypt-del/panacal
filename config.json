@@ -11,7 +11,7 @@
   "pattern": {
     "window_area": 0.065,
     "range": "full",
-    "settle_seconds": 2.0,
+    "settle_seconds": 0.5,
     "display": {
       "primary": false,
       "width": 1920,
