@@ -46,6 +46,22 @@ class MeterPipeTests(unittest.TestCase):
         self.assert_closed(meter, process)
         meter.close()
 
+    def test_restart_after_a_hung_read_gives_a_fresh_working_session(self):
+        meter = self.meter("normal")
+        first = meter.process
+        try:
+            self.assertEqual(meter.read(), XYZ(1, 2, 3))
+            meter.restart()
+            self.assert_closed_process(first)
+            self.assertNotEqual(meter.process.pid, first.pid)
+            self.assertEqual(meter.read(), XYZ(1, 2, 3))
+        finally:
+            meter.close()
+
+    def assert_closed_process(self, process):
+        self.assertIsNotNone(process.poll())
+        self.assertTrue(process.stdin.closed)
+
     def test_argyll_quit_confirmation_exits_normally(self):
         meter = self.meter("confirm_quit")
         process = meter.process

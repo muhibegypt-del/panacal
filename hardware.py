@@ -13,7 +13,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from colour import median_xyz, xyz_to_uv, xyz_to_xyy
+from colour import D65_UV, D65_XY, code_fraction, median_xyz, signal_code, xyz_to_uv, xyz_to_xyy
 from domain import Measurement, XYZ
 
 
@@ -82,10 +82,13 @@ class PatternHost:
 
     def _write_command(self, stimulus: int = 0, close: bool = False) -> None:
         self.sequence += 1
+        signal_range = self.config["pattern"]["range"]
         data = {
             "sequence": self.sequence,
             "stimulus": int(stimulus),
-            "range": self.config["pattern"]["range"],
+            # The exact 8-bit code is decided here so targets match the patch.
+            "code": signal_code(stimulus, signal_range),
+            "range": signal_range,
             "close": bool(close),
             "window_area": float(self.config["pattern"]["window_area"]),
         }
@@ -194,7 +197,7 @@ class PatternHost:
         self._write_command(stimulus)
         status = self._wait(self.sequence, 5.0)
         self.log.write(
-            f"PATCH {stimulus:3d}% area={status['window_area']:.3f} "
+            f"PATCH {stimulus:3d}% code={status.get('code')} area={status['window_area']:.3f} "
             f"range={self.config['pattern']['range']} {status['device']}"
         )
 
@@ -466,6 +469,13 @@ class Meter:
                 self.log.write("METER READY persistent session")
                 return
 
+    def restart(self) -> None:
+        """Close and relaunch spotread after a transient USB or prompt failure."""
+        self.close()
+        self.lines = queue.Queue()
+        self.recent_output.clear()
+        self._start()
+
     def read(self) -> XYZ:
         if not self.process or not self.process.stdin or not self.ready:
             raise RuntimeError("Meter is not running")
@@ -540,20 +550,85 @@ class Meter:
             self.process = None
 
 
+def read_meter(meter, log: Transcript, attempts: int = 3) -> XYZ:
+    """Read once, restarting spotread after a transient failure."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return meter.read()
+        except (TimeoutError, RuntimeError, OSError) as exc:
+            restart = getattr(meter, "restart", None)
+            if attempt == attempts or restart is None:
+                raise
+            log.write(f"METER RECOVERY {exc!r}; restarting spotread ({attempt}/{attempts - 1})")
+            restart()
+    raise AssertionError("unreachable")
+
+
+def invalid_reading(xyz: XYZ, level: int) -> str:
+    """Reason a raw reading cannot be a real patch measurement, or ''."""
+    if not all(math.isfinite(value) for value in xyz.as_tuple()):
+        return "non-finite"
+    if xyz.Y < 0 or (level > 0 and xyz.Y == 0):
+        return "no luminance"
+    total = xyz.X + xyz.Y + xyz.Z
+    if level > 0 and total > 0 and xyz.Y < 0.5:
+        # Argyll reports equal-energy white when the sensor saw nothing usable.
+        if abs(xyz.X / total - 1 / 3) < 2e-4 and abs(xyz.Y / total - 1 / 3) < 2e-4:
+            return "null equal-energy result"
+    return ""
+
+
 def measure(pattern: PatternHost, meter: Meter, log: Transcript, level: int,
-            count: int, settle_seconds: float, stage: str) -> Measurement:
-    pattern.show(level)
-    time.sleep(settle_seconds)
-    readings = []
-    for number in range(1, count + 1):
-        log.write(f"MEASURE stage={stage} level={level}% read={number}/{count}")
-        readings.append(meter.read())
-    centre = median_xyz(readings)
-    x, y, _ = xyz_to_xyy(centre)
-    u, v = xyz_to_uv(centre)
+            count: int, settle_seconds: float, stage: str, *,
+            signal_range: str = "full", expected_y: float | None = None,
+            attempts: int = 3, sleep=None) -> Measurement:
+    """Median of `count` valid reads. Invalid reads are discarded and re-read;
+    an implausible median (0.35x-2.2x expected Y at 15% and above) re-shows
+    the patch and measures again."""
+    sleep = sleep or time.sleep
+    signal = code_fraction(signal_code(level, signal_range), signal_range)
+    problem = ""
+    for attempt in range(1, attempts + 1):
+        pattern.show(level)
+        sleep(settle_seconds)
+        readings = []
+        discarded = 0
+        while len(readings) < count:
+            log.write(f"MEASURE stage={stage} level={level}% read={len(readings) + 1}/{count}")
+            xyz = read_meter(meter, log)
+            reason = invalid_reading(xyz, level)
+            if not reason:
+                readings.append(xyz)
+                continue
+            discarded += 1
+            log.write(f"DISCARD stage={stage} level={level}% {reason}: {xyz.as_tuple()}")
+            if discarded > count + 1:
+                raise RuntimeError(f"Meter gave {discarded} invalid readings at {level}% ({reason})")
+            sleep(0.4)
+        centre = median_xyz(readings)
+        if expected_y and expected_y > 0 and level >= 15:
+            ratio = centre.Y / expected_y
+            if not 0.35 <= ratio <= 2.2:
+                problem = (f"{level}% read {centre.Y:.3f} cd/m2 for about {expected_y:.3f} expected "
+                           f"(x{ratio:.2f})")
+                log.write(f"IMPLAUSIBLE stage={stage} {problem}; re-showing patch ({attempt}/{attempts})")
+                sleep(1.0 + attempt)
+                continue
+        break
+    else:
+        raise RuntimeError("Implausible meter reading persisted: " + problem +
+                           ". Check the Spyder5 is centred on the patch.")
+    if centre.X + centre.Y + centre.Z > 0:
+        x, y, _ = xyz_to_xyy(centre)
+        u, v = xyz_to_uv(centre)
+    else:
+        # A true zero black has no chromaticity; report it as neutral.
+        (x, y), (u, v) = D65_XY, D65_UV
     uv_radii = []
     y_spreads = []
     for sample in readings:
+        if sample.X + sample.Y + sample.Z <= 0:
+            continue
         sample_u, sample_v = xyz_to_uv(sample)
         uv_radii.append(math.hypot(sample_u - u, sample_v - v))
         y_spreads.append(abs(sample.Y - centre.Y) / max(centre.Y, 1e-12))
@@ -567,6 +642,7 @@ def measure(pattern: PatternHost, meter: Meter, log: Transcript, level: int,
         read_count=count,
         uv_noise=max(uv_radii, default=0.0),
         y_noise=max(y_spreads, default=0.0),
+        signal=signal,
     )
     log.write(
         f"POINT stage={stage} level={level}% Y={centre.Y:.6f} "
@@ -574,4 +650,3 @@ def measure(pattern: PatternHost, meter: Meter, log: Transcript, level: int,
         f"noise_Y={result.y_noise:.2%}"
     )
     return result
-

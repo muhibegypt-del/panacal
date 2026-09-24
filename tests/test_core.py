@@ -8,12 +8,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from colour import (D65_UV, D65_XYZ, bt1886_target_y, delta_e_2000,
-                    evaluate, metrics, power_target_y, xyz_to_lab, xyz_to_xyy)
+from colour import (D65_UV, D65_XYZ, bt1886_target_y, code_fraction, delta_e_2000,
+                    metrics, power_target_y, signal_code, tint, xyz_to_lab, xyz_to_xyy)
 from domain import Measurement, XYZ
 from hardware import PatternHost, TVSession
-from autocal import connect_tv, validate_signal_path
-from solver import propose_red_blue, white_balance_improved
+from autocal import connect_tv, resolve_connection, validate_signal_path
+from solver import best_integer_move, predict_error, update_model, white_balance_improved
 
 
 def measurement(level: int, xyz: XYZ) -> Measurement:
@@ -51,48 +51,65 @@ class ColourMathTests(unittest.TestCase):
         for level in range(5, 101, 5):
             Y = power_target_y(level, black_y, white_y, 2.4)
             rows.append(measurement(level, XYZ(D65_XYZ.X*Y, Y, D65_XYZ.Z*Y)))
-        result = evaluate(rows, black_y, white_y, "power", 2.4)
-        self.assertLess(result.chroma_score, 1e-10)
-        self.assertLess(result.gamma_score, 1e-10)
         for row in rows:
             item = metrics(row, black_y, white_y, "power", 2.4)
             self.assertLess(item.total_delta_e, 1e-10)
+            self.assertLess(item.chroma_delta_e, 1e-10)
+            self.assertLess(abs(item.log_y_error), 1e-10)
+            self.assertLess(tint(row), 1e-9)
+
+    def test_signal_codes_round_half_up_and_targets_use_the_drawn_code(self):
+        self.assertEqual(signal_code(10), 26)
+        self.assertEqual(signal_code(30), 77)   # 76.5: banker's rounding gave 76
+        self.assertEqual(signal_code(50), 128)
+        self.assertEqual(signal_code(95), 242)
+        self.assertEqual(signal_code(100, "limited"), 235)
+        self.assertEqual(signal_code(0, "limited"), 16)
+        self.assertAlmostEqual(code_fraction(26), 26 / 255)
+        white = 120.0
+        drawn = code_fraction(26)
+        Y = white * drawn ** 2.4
+        row = Measurement(10, XYZ(D65_XYZ.X*Y/1, Y, D65_XYZ.Z*Y), 0.3127, 0.3290,
+                          D65_UV[0], D65_UV[1], 1, signal=drawn)
+        self.assertLess(abs(metrics(row, 0.0, white).log_y_error), 1e-12)
 
 
 class SolverTests(unittest.TestCase):
-    def test_red_blue_solver_moves_toward_target_and_stays_bounded(self):
-        baseline = Measurement(
-            level=50,
-            xyz=XYZ(1, 1, 1),
-            x=1/3,
-            y=1/3,
-            u=D65_UV[0] + 0.010,
-            v=D65_UV[1] - 0.020,
-            read_count=1,
-        )
-        proposal = propose_red_blue(
-            current={"R": 0, "B": 0},
-            codes=("R", "B"),
-            baseline=baseline,
-            red_response_per_step=(0.001, 0.0),
-            blue_response_per_step=(0.0, 0.002),
-            target_uv=D65_UV,
-            cap=4,
-            gain=0.70,
-        )
-        self.assertEqual(proposal.applied_move, (-4, 4))
-        self.assertEqual(proposal.values, {"R": -4, "B": 4})
+    MODEL = ((0.001, 0.0), (0.0, 0.002))   # red moves u', blue moves v'
 
-    def test_every_proposal_respects_tv_and_iteration_bounds(self):
-        baseline = Measurement(50, XYZ(1, 1, 1), 1/3, 1/3,
-                               D65_UV[0] + 0.5, D65_UV[1] - 0.5, 1)
+    def test_integer_search_finds_the_exact_whole_step_correction(self):
+        plan = best_integer_move({"R": 0, "B": 0}, ("R", "B"), (0.004, -0.004), self.MODEL, cap=4)
+        self.assertEqual(plan.move, (-4, 2))
+        self.assertEqual(plan.values, {"R": -4, "B": 2})
+        self.assertLess(max(abs(value) for value in plan.predicted_error), 1e-12)
+
+    def test_small_corrections_are_not_rounded_away(self):
+        # 0.6 of a step needed: the old damped solver rounded 0.42 to no move.
+        plan = best_integer_move({"R": 0, "B": 0}, ("R", "B"), (0.0006, 0.0), self.MODEL, cap=4)
+        self.assertEqual(plan.move, (-1, 0))
+
+    def test_already_best_setting_proposes_no_move(self):
+        plan = best_integer_move({"R": 3, "B": -2}, ("R", "B"), (0.0002, -0.0003), self.MODEL, cap=4)
+        self.assertEqual(plan.move, (0, 0))
+
+    def test_every_proposal_respects_tv_and_step_bounds(self):
         for start in range(-50, 51, 5):
-            proposal = propose_red_blue(
-                {"R": start, "B": start}, ("R", "B"), baseline,
-                (0.01, 0.0), (0.0, 0.01), D65_UV, cap=4,
-            )
-            self.assertTrue(all(-50 <= value <= 50 for value in proposal.values.values()))
-            self.assertTrue(all(-4 <= move <= 4 for move in proposal.applied_move))
+            plan = best_integer_move({"R": start, "B": start}, ("R", "B"),
+                                     (0.5, -0.5), self.MODEL, cap=4)
+            self.assertTrue(all(-50 <= value <= 50 for value in plan.values.values()))
+            self.assertTrue(all(-4 <= move <= 4 for move in plan.move))
+
+    def test_model_update_reproduces_the_observed_change(self):
+        true = ((0.0015, 0.0002), (-0.0001, 0.0025))
+        move = (2, -1)
+        observed = predict_error((0.0, 0.0), true, move)
+        updated = update_model(self.MODEL, move, observed, weight=1.0)
+        predicted = predict_error((0.0, 0.0), updated, move)
+        self.assertAlmostEqual(predicted[0], observed[0], places=12)
+        self.assertAlmostEqual(predicted[1], observed[1], places=12)
+        half = update_model(self.MODEL, move, observed, weight=0.5)
+        self.assertNotEqual(half, self.MODEL)
+        self.assertEqual(update_model(self.MODEL, (0, 0), observed), self.MODEL)
 
     def test_acceptance_requires_real_improvement(self):
         self.assertTrue(white_balance_improved(1.0, 0.8, 0.03))
@@ -178,6 +195,14 @@ class ConfigurationTests(unittest.TestCase):
         listing = """ 1 = 'DISPLAY3, at 0, 0, width 2560, height 1440'
  2 = 'DISPLAY2, at 3072, 0, width 1536, height 864'"""
         self.assertEqual(PatternHost._dispwin_display_index(listing, r"\\.\DISPLAY2"), 2)
+
+    def test_connection_comes_from_config_or_command_line_without_prompts(self):
+        config = json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig"))
+        config["meter"]["default_executable"] = sys.executable
+        self.assertEqual(resolve_connection(config), (config["tv"]["default_ip"], Path(sys.executable)))
+        self.assertEqual(resolve_connection(config, "10.0.0.9")[0], "10.0.0.9")
+        with self.assertRaisesRegex(RuntimeError, "--meter"):
+            resolve_connection(config, meter="C:/missing/spotread.exe")
 
     def test_signal_guard_accepts_reference_chain_and_rejects_raised_black(self):
         config = json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig"))

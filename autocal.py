@@ -11,10 +11,11 @@ import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-from colour import D65_UV, evaluate, metrics, xyz_to_uv
-from domain import Evaluation, Measurement
+from colour import code_fraction, metrics, signal_code, tint, tint_score, uv_error, xyz_to_uv
+from domain import Measurement
 from hardware import Meter, PatternHost, TVSession, Transcript, measure
-from solver import UnusableResponse, propose_red_blue, white_balance_improved
+from report import write_report
+from solver import Model, best_integer_move, update_model, white_balance_improved
 
 
 HERE = Path(__file__).resolve().parent
@@ -115,6 +116,11 @@ def validate_signal_path(rows: list[Measurement], config: dict) -> dict:
     return evidence
 
 
+TWO_POINT_HIGH = ("WB:HIR", "WB:HIB")
+TWO_POINT_LOW = ("WB:LOR", "WB:LOB")
+DETAIL_GAINS = ("WB:GNR", "WB:GNB")
+
+
 class AutoCal:
     def __init__(self, tv: TVSession, pattern: PatternHost, meter: Meter,
                  log: Transcript, config: dict):
@@ -124,15 +130,30 @@ class AutoCal:
         self.log = log
         self.config = config
         self.settle = float(config["pattern"]["settle_seconds"])
+        self.signal_range = config["pattern"]["range"]
         self.curve = config["target"]["curve"]
         self.gamma = float(config["target"]["gamma"])
         self.solver_config = config["solver"]
         self.black_y = 0.0
-        self.white_y = 1.0
+        self.white_y: float | None = None
+        # Learned u'v'-per-step response of each control pair, by stage key.
+        self.models: dict[str, Model] = {}
+        # Differences between readings at unchanged controls, by level.
+        self.noise_samples: dict[int, list[float]] = {}
 
-    def read(self, level: int, stage: str, fast: bool = False) -> Measurement:
-        return measure(self.pattern, self.meter, self.log, level,
-                       read_count(level, self.config, fast), self.settle, stage)
+    def read(self, level: int, stage: str, fast: bool = False,
+             settle: float | None = None) -> Measurement:
+        expected = None
+        if self.white_y:
+            fraction = code_fraction(signal_code(level, self.signal_range), self.signal_range)
+            expected = self.white_y * fraction ** self.gamma
+        row = measure(self.pattern, self.meter, self.log, level,
+                      read_count(level, self.config, fast),
+                      self.settle if settle is None else settle, stage,
+                      signal_range=self.signal_range, expected_y=expected)
+        if row.read_count > 1 and row.uv_noise > 0:
+            self._record_noise(level, row.uv_noise)
+        return row
 
     def read_levels(self, levels: list[int] | tuple[int, ...], stage: str) -> list[Measurement]:
         return [self.read(level, stage) for level in sorted(set(levels))]
@@ -140,9 +161,25 @@ class AutoCal:
     def sweep(self, stage: str) -> list[Measurement]:
         return self.read_levels(MEASURE_LEVELS, stage)
 
-    def score(self, rows: list[Measurement]) -> Evaluation:
-        weights = {10: 0.70}
-        return evaluate(rows, self.black_y, self.white_y, self.curve, self.gamma, weights)
+    def _record_noise(self, level: int, value: float) -> None:
+        self.noise_samples.setdefault(level, []).append(value)
+
+    def noise(self, level: int) -> float:
+        """Typical u'v' difference between readings at unchanged controls,
+        interpolated between the nearest levels with evidence (meter noise
+        rises steeply in the shadows, so a far darker level is no guide)."""
+        if not self.noise_samples:
+            return 0.0
+        known = {lvl: statistics.median(values) for lvl, values in self.noise_samples.items()}
+        if level in known:
+            return known[level]
+        below = [lvl for lvl in known if lvl < level]
+        above = [lvl for lvl in known if lvl > level]
+        if not below or not above:
+            return known[max(below) if below else min(above)]
+        low, high = max(below), min(above)
+        share = (level - low) / (high - low)
+        return known[low] + share * (known[high] - known[low])
 
     def _select(self, slot: int | None) -> None:
         if slot is not None:
@@ -169,6 +206,9 @@ class AutoCal:
         self._select(slot)
         self.tv.set_number(code, current)
         restored = self.read(primary, f"{label}_{code}_restored", fast=True)
+        # Same controls before and after the probe: their difference is the
+        # meter noise plus drift at this level.
+        self._record_noise(primary, math.hypot(restored.u - rolling.u, restored.v - rolling.v))
         reference_u = (rolling.u + restored.u) / 2.0
         reference_v = (rolling.v + restored.v) / 2.0
         response = ((changed.u - reference_u) / step,
@@ -185,141 +225,195 @@ class AutoCal:
         }
         return response, restored, evidence
 
+    def _probe(self, codes: tuple[str, str], current: dict[str, int], primary: int,
+               slot: int | None, rolling: Measurement,
+               label: str) -> tuple[Model, Measurement, list[dict]]:
+        columns, evidence = [], []
+        for code in codes:
+            column, rolling, item = self._response_column(
+                code, current[code], primary, slot, rolling, label)
+            columns.append(column)
+            evidence.append(item)
+        return (columns[0], columns[1]), rolling, evidence
+
     def optimise_white_balance(self, label: str, primary: int, affected: list[int],
                                codes: tuple[str, str], slot: int | None,
-                               cap: int, iterations: int, *,
-                               initial_primary: Measurement | None = None) -> list[dict]:
+                               cap: int, iterations: int, *, model_key: str,
+                               inherit_from: str | None = None,
+                               initial_primary: Measurement | None = None) -> dict:
         """Correct one red/blue pair at `primary`, guarding the `affected` levels.
 
-        Readings at unchanged controls are reused: the last restored probe is
-        the reference, and an accepted candidate starts the next iteration.
+        The move is chosen by simulating every whole-step setting against the
+        learned response model. Probing happens only when no model exists, or
+        when a move from an inherited or learned model fails. Readings at
+        unchanged controls are always reused.
         """
-        history = []
         if initial_primary is not None and initial_primary.level != primary:
             raise ValueError("Initial measurement does not match the correction level")
-        reusable_primary = initial_primary
+        stop_uv = float(self.solver_config["white_balance_stop_uv"])
+        floor_uv = float(self.solver_config["white_balance_minimum_improvement_uv"])
+        weight = float(self.solver_config["model_update_weight"])
+        model = self.models.get(model_key)
+        source = "learned" if model else None
+        if model is None and inherit_from in self.models:
+            model, source = self.models[inherit_from], f"inherited:{inherit_from}"
+        probed = False
+        history = []
+        latest = initial_primary
+        start = None
         for iteration in range(1, iterations + 1):
             current = self._read_controls(codes, slot)
-            initial_rows = [reusable_primary or self.read(primary, f"{label}_before_{iteration}")]
-            reusable_primary = None
-            initial_score = self.score(initial_rows)
-            if initial_score.chroma_score <= float(self.solver_config["white_balance_stop_delta_e"]):
+            before = latest or self.read(primary, f"{label}_before_{iteration}")
+            if start is None:
+                start = {"controls": current, "measurement": before}
+            noise = self.noise(primary)
+            if tint(before) <= max(stop_uv, noise):
+                latest = before
                 history.append({"iteration": iteration, "accepted": False,
                                 "reason": "within_target", "controls": current,
-                                "measurements": initial_rows, "score": initial_score})
+                                "measurement": before, "tint": tint(before),
+                                "noise": noise})
                 break
-
-            rolling = initial_rows[0]
-            columns = []
             responses = []
-            for code in codes:
-                column, rolling, evidence = self._response_column(
-                    code, current[code], primary, slot, rolling, label
-                )
-                columns.append(column)
-                responses.append(evidence)
-
-            # Both probes have been restored, so the last primary reading is
-            # already the reference; only the other guard levels are read.
+            if model is None:
+                model, before, responses = self._probe(codes, current, primary, slot, before, label)
+                probed, source = True, "probe"
+                noise = self.noise(primary)
+            latest = before
             reference_rows = [
-                rolling if level == primary else
+                before if level == primary else
                 self.read(level, f"{label}_reference_{iteration}", fast=True)
                 for level in sorted(set(affected))
             ]
-            reference_score = self.score(reference_rows)
-            reference = {row.level: row for row in reference_rows}[primary]
-            try:
-                proposal = propose_red_blue(
-                    current=current,
-                    codes=codes,
-                    baseline=reference,
-                    red_response_per_step=columns[0],
-                    blue_response_per_step=columns[1],
-                    target_uv=D65_UV,
-                    cap=cap,
-                    gain=float(self.solver_config["gain_rgb"]),
-                )
-            except UnusableResponse as exc:
-                history.append({"iteration": iteration, "accepted": False,
-                                "reason": str(exc), "controls": current,
-                                "responses": responses, "score": reference_score})
-                break
-            if all(value == 0 for value in proposal.applied_move):
+            reference = tint_score(reference_rows)
+            plan = best_integer_move(current, codes, uv_error(before), model, cap)
+            if plan.move == (0, 0):
+                if not probed:
+                    # The borrowed model says no step helps; confirm by probing.
+                    history.append({"iteration": iteration, "accepted": False,
+                                    "reason": "no_move_reprobe", "controls": current,
+                                    "model_source": source, "tint": tint(before)})
+                    model = None
+                    continue
                 history.append({"iteration": iteration, "accepted": False,
                                 "reason": "no_integer_move", "controls": current,
-                                "proposal": proposal, "score": reference_score})
+                                "model_source": source, "tint": tint(before)})
                 break
 
-            self._write_controls(dict(proposal.values), slot)
+            self._write_controls(dict(plan.values), slot)
             candidate_rows = self.read_levels(affected, f"{label}_candidate_{iteration}")
-            candidate_score = self.score(candidate_rows)
-            accepted = white_balance_improved(
-                reference_score.chroma_score,
-                candidate_score.chroma_score,
-                float(self.solver_config["white_balance_minimum_improvement"]),
-            ) and candidate_score.maximum_chroma_delta_e <= reference_score.maximum_chroma_delta_e + 0.15
+            candidate = next(row for row in candidate_rows if row.level == primary)
+            candidate_score = tint_score(candidate_rows)
+            model_before = model
+            model = update_model(model, plan.move,
+                                 (candidate.u - before.u, candidate.v - before.v), weight)
+            threshold = max(floor_uv, noise)
+            accepted = (white_balance_improved(reference.rms, candidate_score.rms, threshold)
+                        and candidate_score.maximum <= reference.maximum + threshold)
             if not accepted:
                 self._write_controls(current, slot)
+            predicted = math.hypot(*plan.predicted_error)
             self.log.write(
                 f"DECISION {label} iteration={iteration} {'ACCEPT' if accepted else 'RESTORE'} "
-                f"chroma={reference_score.chroma_score:.3f}->{candidate_score.chroma_score:.3f} "
-                f"max={reference_score.maximum_chroma_delta_e:.3f}->{candidate_score.maximum_chroma_delta_e:.3f}"
+                f"model={source} move={plan.move} tint={reference.rms:.5f}->{candidate_score.rms:.5f} "
+                f"predicted={predicted:.5f} measured={tint(candidate):.5f} "
+                f"threshold={threshold:.5f}"
             )
             history.append({
                 "iteration": iteration,
                 "accepted": accepted,
+                "model_source": source,
+                "model": model_before,
                 "controls_before": current,
-                "proposal": proposal,
+                "controls_tried": dict(plan.values),
+                "move": plan.move,
                 "responses": responses,
+                "before_error": uv_error(before),
+                "predicted_error": plan.predicted_error,
+                "measured_error": uv_error(candidate),
+                "threshold": threshold,
                 "reference_measurements": reference_rows,
-                "reference_score": reference_score,
+                "reference_score": reference,
                 "candidate_measurements": candidate_rows,
                 "candidate_score": candidate_score,
             })
-            if not accepted:
+            if accepted:
+                latest = candidate
+                source = "learned" if source != "probe" else source
+            elif probed:
                 break
-            reusable_primary = next(row for row in candidate_rows if row.level == primary)
-        return history
+            else:
+                # Controls are restored, so `before` is still valid. Measure
+                # this point's own response before trying again.
+                model = None
+        if model is not None:
+            self.models[model_key] = model
+        return {
+            "label": label,
+            "primary": primary,
+            "slot": slot,
+            "codes": list(codes),
+            "start": start,
+            "end": {"controls": self._read_controls(codes, slot), "measurement": latest},
+            "history": history,
+        }
 
     def run(self) -> dict:
-        result = {"version": 4, "workflow": "direct_two_point", "stages": {}}
-        self.log.write("START TWO-POINT: measuring white, then correcting RGB; no opening sweep")
-        white = self.read(100, "two_point_high_start", fast=True)
+        result = {"version": 5, "workflow": "learn_then_simulate", "stages": {}}
+        # Every tint and luminance target rests on this reading: settle longer
+        # and use the full white read count.
+        self.log.write("REFERENCE WHITE")
+        white = self.read(100, "reference_white", settle=max(self.settle, 3.0))
         if white.xyz.Y <= 0:
             raise RuntimeError("Cannot calibrate: the white patch has no positive luminance")
         self.white_y = white.xyz.Y
-        # White-balance scoring compares D65 at each reading's own luminance,
-        # so black is only measured by the final verification sweep.
-        result["starting_white"] = white
+        result["reference_white"] = white
 
+        black = self.read(0, "preflight_black", fast=True)
+        ratio = black.xyz.Y / white.xyz.Y
+        result["preflight_black"] = {"measurement": black, "black_white_ratio": ratio}
+        limit = float(self.config["signal_guard"]["maximum_black_white_ratio"])
+        self.log.write(f"PREFLIGHT black={black.xyz.Y:.4f} white={white.xyz.Y:.2f} ratio={ratio:.5f}")
+        if ratio > limit:
+            raise RuntimeError(
+                f"Black is raised ({black.xyz.Y:.3f} cd/m2, {ratio:.4f} of white; limit {limit}). "
+                "Brightness is probably too high: set it with the AVS HD 709 black clipping "
+                "pattern, then run again. No calibration values were changed."
+            )
+        self.black_y = black.xyz.Y
+
+        stages = result["stages"]
         two_iterations = int(self.solver_config["two_point_iterations"])
-        result["stages"]["two_point_high"] = self.optimise_white_balance(
-            "two_point_high", 100, [60, 80, 100], ("WB:HIR", "WB:HIB"),
-            None, cap=4, iterations=two_iterations, initial_primary=white,
+        stages["two_point_high"] = self.optimise_white_balance(
+            "two_point_high", 100, [60, 80, 100], TWO_POINT_HIGH, None,
+            cap=4, iterations=two_iterations, model_key="two_point_high",
+            initial_primary=white,
         )
-        self.log.write("TWO-POINT LOW: measuring and correcting 10%")
-        result["stages"]["two_point_low"] = self.optimise_white_balance(
-            "two_point_low", 10, [10, 20, 30], ("WB:LOR", "WB:LOB"),
-            None, cap=3, iterations=two_iterations,
+        self.log.write("TWO-POINT LOW: correcting at 20%")
+        stages["two_point_low"] = self.optimise_white_balance(
+            "two_point_low", 20, [20, 30, 40], TWO_POINT_LOW, None,
+            cap=3, iterations=two_iterations, model_key="two_point_low",
         )
 
+        # Top down: probes at bright levels are quick and quiet, and each
+        # lower point starts from the model its neighbour just refined.
         detail_iterations = int(self.solver_config["detail_iterations"])
         detail_results = []
-        for slot in DETAIL_SLOTS:
+        previous = None
+        for slot in sorted(DETAIL_SLOTS, reverse=True):
             primary = SLOT_PATCH.get(slot, slot)
-            detail_results.append({
-                "slot": slot,
-                "primary": primary,
-                "history": self.optimise_white_balance(
-                    f"detail_{slot}", primary, [primary], ("WB:GNR", "WB:GNB"),
-                    slot, cap=4 if slot > 10 else 5, iterations=detail_iterations,
-                ),
-            })
-        result["stages"]["detailed_white_balance"] = detail_results
+            key = f"detail_{slot}"
+            detail_results.append(self.optimise_white_balance(
+                key, primary, [primary], DETAIL_GAINS, slot,
+                cap=4 if slot > 10 else 5, iterations=detail_iterations,
+                model_key=key, inherit_from=previous,
+            ))
+            previous = key
+        stages["detailed_white_balance"] = detail_results
 
-        result["stages"]["final_high_polish"] = self.optimise_white_balance(
-            "final_high", 100, [80, 90, 95, 100], ("WB:HIR", "WB:HIB"),
-            None, cap=2, iterations=1,
+        stages["final_high_polish"] = self.optimise_white_balance(
+            "final_high", 100, [80, 90, 95, 100], TWO_POINT_HIGH, None,
+            cap=2, iterations=1, model_key="two_point_high",
         )
 
         final = self.sweep("final_verification")
@@ -342,10 +436,12 @@ def summarise_sweep(rows: list[Measurement], autocal: AutoCal) -> dict:
         if 0 < row.level < 100:
             relative = (row.xyz.Y - black_y) / max(white_y - black_y, 1e-12)
             if 0 < relative < 1:
-                effective_gammas.append(math.log(relative) / math.log(row.level / 100.0))
+                effective_gammas.append(math.log(relative) / math.log(row.signal_fraction))
     reportable = [point for point in points if point["measurement"].level > 0]
     worst_total = max(reportable, key=lambda point: point["metrics"].total_delta_e)
     worst_chroma = max(reportable, key=lambda point: point["metrics"].chroma_delta_e)
+    tints = {point["measurement"].level: tint(point["measurement"]) for point in reportable}
+    worst_tint_level = max(tints, key=tints.get)
     return {
         "curve": autocal.curve,
         "target_gamma": autocal.gamma,
@@ -358,8 +454,20 @@ def summarise_sweep(rows: list[Measurement], autocal: AutoCal) -> dict:
         "maximum_chroma_delta_e_2000": worst_chroma["metrics"].chroma_delta_e,
         "worst_chroma_level": worst_chroma["measurement"].level,
         "median_effective_gamma": statistics.median(effective_gammas),
+        "average_tint_uv": statistics.mean(tints.values()),
+        "maximum_tint_uv": tints[worst_tint_level],
+        "worst_tint_level": worst_tint_level,
         "points": points,
     }
+
+
+def print_summary(summary: dict) -> None:
+    print(f"White point: average tint {summary['average_tint_uv']:.5f} u'v', worst "
+          f"{summary['maximum_tint_uv']:.5f} at {summary['worst_tint_level']}%")
+    print(f"Chroma dE2000 average {summary['average_chroma_delta_e_2000']:.2f}, maximum "
+          f"{summary['maximum_chroma_delta_e_2000']:.2f} at {summary['worst_chroma_level']}%")
+    print(f"dE2000 incl. luminance average {summary['average_delta_e_2000']:.2f}; "
+          f"measured gamma {summary['median_effective_gamma']:.3f}")
 
 
 def connect_tv(ip: str, log: Transcript, config: dict, retries: int = 3,
@@ -407,7 +515,8 @@ def open_hardware(session: Path, log: Transcript, config: dict, ip: str,
     try:
         pattern.start(100 if prepare else 50)
         tv = connect_tv(ip, log, config)
-        answer = input("Press Enter if the patch is on the Panasonic; type N if it is not: ").strip().upper()
+        answer = input("Patch showing on the Panasonic? Place the Spyder5 flat on its centre, "
+                       "then press Enter (N to stop): ").strip().upper()
         if answer in {"N", "NO"}:
             raise RuntimeError("Operator rejected Panasonic pattern placement")
         # Initialise USB and load the correction. The first actual reading
@@ -443,17 +552,25 @@ def close_hardware(pattern, tv, meter, log) -> None:
                 pass
 
 
-def ask_connection(config: dict) -> tuple[str, Path]:
-    ip = input(f"TV IP [{config['tv']['default_ip']}]: ").strip() or config["tv"]["default_ip"]
-    default_meter = config["meter"]["default_executable"]
-    meter_text = input(f"spotread.exe [{default_meter}]: ").strip()
-    meter_path = Path(meter_text or default_meter)
+def resolve_connection(config: dict, ip: str | None = None,
+                       meter: str | None = None) -> tuple[str, Path]:
+    """TV IP and spotread path from the command line, else config.json."""
+    ip = ip or config["tv"]["default_ip"]
+    meter_path = Path(meter or config["meter"]["default_executable"])
     if not meter_path.is_file():
-        raise RuntimeError(f"spotread.exe not found: {meter_path}")
+        raise RuntimeError(f"spotread.exe not found: {meter_path} (set meter.default_executable "
+                           "in config.json or pass --meter)")
     return ip, meter_path
 
 
-def run_autocal() -> int:
+PREPARE_TEXT = (
+    "Before running: the TV has been on for 30-60 minutes, Brightness and Contrast are set "
+    "with the AVS HD 709 clipping patterns, ISFccc Network shows Waiting for Connection, and "
+    "Windows shows the Panasonic as the sole 1920x1080 secondary screen in Extend mode."
+)
+
+
+def run_autocal(ip_override: str | None = None, meter_override: str | None = None) -> int:
     config = load_config()
     session = new_session("autocal")
     log = Transcript(session / "autocal.log")
@@ -462,13 +579,9 @@ def run_autocal() -> int:
     writes_started = False
     try:
         validate_meter_configuration(config)
-        print("\nPANASONIC GT60/VT60 AUTOCAL V4 - DIRECT TWO-POINT START")
-        print("Windows must show the Panasonic as the sole 1920x1080 secondary screen in Extend mode.")
-        print("V4 uses your existing TV settings and starts two-point correction after meter initialisation.")
-        print("No opening grayscale sweep. Detailed calibration and final verification follow.")
-        print("Arm ISFccc Network at Waiting for Connection.")
-        input("Press Enter when the TV is armed; place the Spyder5 after the centre patch appears...")
-        ip, meter_path = ask_connection(config)
+        print("\nPANASONIC GT60/VT60 WHITE-BALANCE AUTOCAL V5")
+        print(PREPARE_TEXT)
+        ip, meter_path = resolve_connection(config, ip_override, meter_override)
         pattern, tv, meter, original = open_hardware(
             session, log, config, ip, meter_path, prepare=True
         )
@@ -479,13 +592,11 @@ def run_autocal() -> int:
         result["final_snapshot"] = tv.snapshot()
         save_json(session / "autocal_result.json", result)
         save_json(session / "final_snapshot.json", result["final_snapshot"])
-        summary = result["final_summary"]
+        report = write_report(session / "report.html", result, config,
+                              f"Panasonic {tv.model} white-balance AutoCal")
         print("\nAUTOCAL COMPLETE")
-        print(f"Average dE00 {summary['average_delta_e_2000']:.2f}; "
-              f"maximum {summary['maximum_delta_e_2000']:.2f} at {summary['worst_delta_e_level']}%")
-        print(f"Chroma-only average {summary['average_chroma_delta_e_2000']:.2f}; "
-              f"gamma {summary['median_effective_gamma']:.3f}")
-        print("Results:", session)
+        print_summary(result["final_summary"])
+        print("Report:", report)
         return 0
     except Exception as exc:
         log.write("AUTOCAL FAILED " + repr(exc))
@@ -505,32 +616,29 @@ def run_autocal() -> int:
         close_hardware(pattern, tv, meter, log)
 
 
-def run_verification() -> int:
+def run_verification(ip_override: str | None = None, meter_override: str | None = None) -> int:
     config = load_config()
     session = new_session("verify")
     log = Transcript(session / "verification.log")
     pattern = tv = meter = None
     try:
         validate_meter_configuration(config)
-        print("\nPANASONIC GT60/VT60 READ-ONLY VERIFICATION V4")
+        print("\nPANASONIC GT60/VT60 READ-ONLY VERIFICATION V5")
         print("Arm ISFccc Network at Waiting for Connection. No calibration values will be written.")
-        input("Press Enter when the TV is armed; place the Spyder5 after the centre patch appears...")
-        ip, meter_path = ask_connection(config)
+        ip, meter_path = resolve_connection(config, ip_override, meter_override)
         pattern, tv, meter, snapshot = open_hardware(session, log, config, ip, meter_path)
         save_json(session / "tv_snapshot.json", snapshot)
         save_json(session / "effective_config.json", config)
         autocal = AutoCal(tv, pattern, meter, log, config)
         rows = autocal.sweep("read_only_verification")
         summary = summarise_sweep(rows, autocal)
-        save_json(session / "verification_result.json", {
-            "version": 4, "read_only": True, "measurements": rows, "summary": summary
-        })
+        verification = {"version": 5, "read_only": True, "measurements": rows, "summary": summary}
+        save_json(session / "verification_result.json", verification)
+        report = write_report(session / "report.html", verification, config,
+                              f"Panasonic {tv.model} read-only verification")
         print("\nVERIFICATION COMPLETE - NO CALIBRATION VALUES WERE WRITTEN")
-        print(f"Average dE00 {summary['average_delta_e_2000']:.2f}; "
-              f"maximum {summary['maximum_delta_e_2000']:.2f} at {summary['worst_delta_e_level']}%")
-        print(f"Chroma-only average {summary['average_chroma_delta_e_2000']:.2f}; "
-              f"gamma {summary['median_effective_gamma']:.3f}")
-        print("Results:", session)
+        print_summary(summary)
+        print("Report:", report)
         return 0
     except Exception as exc:
         log.write("VERIFICATION FAILED " + repr(exc))
@@ -603,7 +711,7 @@ def measure_settle(pattern, meter, tv, log, delays=(0.25, 0.5, 1.0),
             "trials": trials, "recommended_settle_seconds": recommended}
 
 
-def run_settle_test() -> int:
+def run_settle_test(ip_override: str | None = None, meter_override: str | None = None) -> int:
     config = load_config()
     session = new_session("settle")
     log = Transcript(session / "settle.log")
@@ -613,8 +721,8 @@ def run_settle_test() -> int:
         print("\nPANASONIC SETTLE-TIME TEST")
         print("Measures how soon a reading is stable after a patch or TV control change.")
         print("It toggles two-point high red by 6 steps and always puts it back.")
-        input("Press Enter when the TV is armed; place the Spyder5 after the centre patch appears...")
-        ip, meter_path = ask_connection(config)
+        print("Arm ISFccc Network at Waiting for Connection.")
+        ip, meter_path = resolve_connection(config, ip_override, meter_override)
         pattern, tv, meter, snapshot = open_hardware(session, log, config, ip, meter_path)
         save_json(session / "tv_snapshot.json", snapshot)
         result = measure_settle(pattern, meter, tv, log)
@@ -634,11 +742,13 @@ def run_settle_test() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Panasonic GT60/VT60 white-balance AutoCal")
     parser.add_argument("mode", choices=("run", "verify", "settle"), nargs="?", default="run")
+    parser.add_argument("--ip", help="TV IP address (default: tv.default_ip in config.json)")
+    parser.add_argument("--meter", help="path to spotread.exe (default: meter.default_executable)")
     args = parser.parse_args()
     return {"run": run_autocal, "verify": run_verification,
-            "settle": run_settle_test}[args.mode]()
+            "settle": run_settle_test}[args.mode](args.ip, args.meter)
 
 
 if __name__ == "__main__":

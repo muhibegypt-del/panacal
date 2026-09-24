@@ -29,7 +29,7 @@ if ($target.Count -ne 1) {
     throw "Expected exactly one secondary display for the Panasonic pattern; found $($target.Count). Windows sees: $inventory."
 }
 $screen = $target[0]
-$script:state = [ordered]@{ sequence = -1; stimulus = 0; range = 'limited'; close = $false; windowArea = 0.10 }
+$script:state = [ordered]@{ sequence = -1; stimulus = 0; code = 0; range = 'full'; close = $false; windowArea = 0.10 }
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Panasonic AutoCal Pattern'
@@ -43,12 +43,8 @@ $form.Cursor = [System.Windows.Forms.Cursors]::None
 
 $form.Add_Paint({
     param($sender, $eventArgs)
-    $p = [Math]::Max(0.0, [Math]::Min(1.0, [double]$script:state.stimulus / 100.0))
-    if ($script:state.range -eq 'limited') {
-        $code = [int][Math]::Round(16 + 219 * $p)
-    } else {
-        $code = [int][Math]::Round(255 * $p)
-    }
+    # The controller sends the exact 8-bit code; nothing is rounded here.
+    $code = [int][Math]::Max(0, [Math]::Min(255, [int]$script:state.code))
     $side = [Math]::Sqrt([Math]::Max(0.01, [Math]::Min(1.0, [double]$script:state.windowArea)))
     $width = [int][Math]::Round($sender.ClientSize.Width * $side)
     $height = [int][Math]::Round($sender.ClientSize.Height * $side)
@@ -74,6 +70,7 @@ function Write-Status([int]$sequence) {
         width = $bounds.Width
         height = $bounds.Height
         stimulus = $script:state.stimulus
+        code = $script:state.code
         range = $script:state.range
         window_area = $script:state.windowArea
     }
@@ -91,6 +88,7 @@ $timer.Add_Tick({
         $next = Get-Content -Raw -LiteralPath $ControlFile | ConvertFrom-Json
         if ([int]$next.sequence -eq [int]$script:state.sequence) { return }
         $script:state.stimulus = [int]$next.stimulus
+        $script:state.code = [int]$next.code
         $script:state.range = [string]$next.range
         if ($null -ne $next.window_area) {
             $script:state.windowArea = [double]$next.window_area

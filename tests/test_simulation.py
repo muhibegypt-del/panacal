@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import copy
 import math
+import random
 import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+from unittest.mock import patch
 
 from autocal import AutoCal, load_config, summarise_sweep
 from colour import D65_UV, power_target_y
@@ -67,9 +70,23 @@ class FakeTV:
 
 
 class FakeMeter:
-    def __init__(self, pattern, tv):
+    """Simulated Spyder5 on a VT60.
+
+    realistic=True adds what the real logs show: u'v' noise that grows in
+    the shadows (~0.0005 at 10%), 0.3% luminance noise, slow drift, and a
+    10-point gain response that is weaker at the dark end than at the top.
+    """
+
+    def __init__(self, pattern, tv, *, realistic=False, seed=7, black=0.005):
         self.pattern = pattern
         self.tv = tv
+        self.realistic = realistic
+        self.random = random.Random(seed)
+        self.black = black
+        self.reads = 0
+
+    def detail_scale(self, slot):
+        return 0.6 + 0.5 * slot / 100 if self.realistic else 1.0
 
     @staticmethod
     def influence(level, centre, width):
@@ -87,7 +104,8 @@ class FakeMeter:
     def read(self):
         level = self.pattern.level
         p = level/100.0
-        black, white = 0.005, 120.0
+        black, white = self.black, 120.0
+        self.reads += 1
         Y = power_target_y(level, black, white, 2.4)
         # Smooth factory errors plus a small local ripple for detailed controls.
         u = D65_UV[0] + 0.0010*(1-p) - 0.0007*p + 0.00035*math.sin(level/13)
@@ -107,16 +125,27 @@ class FakeMeter:
         for slot_text, controls in self.tv.detail.items():
             slot = int(slot_text)
             centre = 95 if slot == 100 else slot
-            weight = self.influence(level, centre, 11.0)
+            weight = self.influence(level, centre, 11.0) * self.detail_scale(slot)
             u += controls["WB:GNR"]*0.00020*weight
             v += controls["WB:GNR"]*0.00002*weight
             u -= controls["WB:GNB"]*0.00002*weight
             v -= controls["WB:GNB"]*0.00020*weight
             Y *= math.exp(controls["PC:GGN"]*0.004*weight)
+        if self.realistic:
+            sigma = 0.00012 * (1 + 3 * (1 - p) ** 3)
+            u += self.random.gauss(0, sigma) + 0.00008 * math.sin(self.reads / 60)
+            v += self.random.gauss(0, sigma) + 0.00008 * math.cos(self.reads / 45)
+            Y *= 1 + self.random.gauss(0, 0.003) + 0.004 * math.sin(self.reads / 30)
         return self.xyz_from_uvY(u, v, Y)
 
 
 class SimulatedClosedLoopTests(unittest.TestCase):
+    def setUp(self):
+        # The reference white waits 3 s on real hardware; not in simulation.
+        sleeper = patch("hardware.time.sleep")
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
+
     def test_complete_loop_improves_saved_objective(self):
         config = load_config()
         config["pattern"]["settle_seconds"] = 0.0
@@ -170,11 +199,12 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         with patch.object(autocal, "sweep", wraps=autocal.sweep) as sweep:
             result = autocal.run()
         first_write = next(i for i, event in enumerate(events) if event[0] == "write")
-        self.assertEqual(events[:first_write], [("read", 100)])
+        # Reference white, then the black preflight, then the first probe.
+        self.assertEqual(events[:first_write], [("read", 100), ("read", 0)])
         self.assertIn(events[first_write][1], ("WB:HIR", "WB:HIB"))
         self.assertEqual([call.args[0] for call in sweep.call_args_list], ["final_verification"])
-        self.assertEqual(result["workflow"], "direct_two_point")
-        self.assertEqual(result["starting_white"].level, 100)
+        self.assertEqual(result["workflow"], "learn_then_simulate")
+        self.assertEqual(result["reference_white"].level, 100)
         self.assertEqual([row.level for row in result["final"]], [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100])
 
     def test_two_point_reuses_reference_and_accepted_primary_readings(self):
@@ -189,20 +219,23 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         autocal.white_y = white.xyz.Y
         stages = []
         read = autocal.read
-        def record(level, stage, fast=False):
+        def record(level, stage, fast=False, settle=None):
             stages.append((level, stage))
-            return read(level, stage, fast)
+            return read(level, stage, fast, settle)
         autocal.read = record
         history = autocal.optimise_white_balance(
             "two_point_high", 100, [60, 80, 100], ("WB:HIR", "WB:HIB"),
-            None, cap=4, iterations=2, initial_primary=white,
-        )
-        self.assertEqual(len(history), 2)
+            None, cap=4, iterations=2, model_key="two_point_high", initial_primary=white,
+        )["history"]
         self.assertTrue(history[0]["accepted"])
+        self.assertEqual(history[0]["model_source"], "probe")
         self.assertFalse(any("_before_" in stage for _, stage in stages))
         self.assertFalse(any(level == 100 and "_reference_" in stage for level, stage in stages))
+        # The second iteration reuses the learned model: no second probe.
+        self.assertEqual(sum("_trial" in stage for _, stage in stages), 2)
         for item in history:
-            self.assertEqual([row.level for row in item["candidate_measurements"]], [60, 80, 100])
+            if "candidate_measurements" in item:
+                self.assertEqual([row.level for row in item["candidate_measurements"]], [60, 80, 100])
 
     def test_two_point_rejects_a_candidate_that_worsens_the_guard_levels(self):
         from dataclasses import replace
@@ -218,8 +251,8 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         white = autocal.read(100, "seed", fast=True)
         autocal.white_y = white.xyz.Y
         read = autocal.read
-        def worsen_guard(level, stage, fast=False):
-            row = read(level, stage, fast)
+        def worsen_guard(level, stage, fast=False, settle=None):
+            row = read(level, stage, fast, settle)
             if level == 60 and "_candidate_" in stage:
                 xyz = XYZ(row.xyz.X * 3, row.xyz.Y, row.xyz.Z * 0.1)
                 x, y, _ = xyz_to_xyy(xyz)
@@ -229,11 +262,79 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         autocal.read = worsen_guard
         history = autocal.optimise_white_balance(
             "two_point_high", 100, [60, 80, 100], ("WB:HIR", "WB:HIB"),
-            None, cap=4, iterations=1, initial_primary=white,
-        )
+            None, cap=4, iterations=1, model_key="two_point_high", initial_primary=white,
+        )["history"]
         self.assertFalse(history[0]["accepted"])
         self.assertEqual(tv.two, original)
 
+
+    def realistic_run(self, **meter_options):
+        config = load_config()
+        config["pattern"]["settle_seconds"] = 0
+        pattern, tv, log = FakePattern(), FakeTV(), FakeLog()
+        tv.two["WB:HIR"] = 20
+        tv.two["WB:HIB"] = -20
+        meter = FakeMeter(pattern, tv, realistic=True, **meter_options)
+        autocal = AutoCal(tv, pattern, meter, log, config)
+        before = summarise_sweep(autocal.sweep("simulation_before"), autocal)
+        meter.reads = 0
+        result = autocal.run()
+        return before, result, meter, log
+
+    def test_noisy_drifting_meter_still_converges_near_d65(self):
+        before, result, meter, _ = self.realistic_run()
+        after = result["final_summary"]
+        self.assertLess(after["average_tint_uv"], before["average_tint_uv"] / 2)
+        self.assertLess(after["average_tint_uv"], 0.0012)
+        self.assertLess(meter.reads, 200)
+
+    def test_detail_points_inherit_the_model_instead_of_probing_each_one(self):
+        _, result, _, _ = self.realistic_run()
+        detail = result["stages"]["detailed_white_balance"]
+        probed = [stage["label"] for stage in detail
+                  if any(item.get("responses") for item in stage["history"])]
+        # Only the first (top) point must probe; a few may re-probe when the
+        # borrowed model misleads them, but most points should not.
+        self.assertEqual(detail[0]["label"], "detail_100")
+        self.assertLessEqual(len(probed), 4)
+        inherited = [item for stage in detail[1:] for item in stage["history"]
+                     if str(item.get("model_source", "")).startswith("inherited:")]
+        self.assertTrue(inherited)
+
+    def test_raised_black_stops_before_any_setting_changes(self):
+        config = load_config()
+        config["pattern"]["settle_seconds"] = 0
+        pattern, tv, log = FakePattern(), FakeTV(), FakeLog()
+        meter = FakeMeter(pattern, tv, black=0.45)
+        writes = []
+        original = tv.set_number
+        tv.set_number = lambda code, value: writes.append(code) or original(code, value)
+        with self.assertRaisesRegex(RuntimeError, "Black is raised.*Brightness"):
+            AutoCal(tv, pattern, meter, log, config).run()
+        self.assertEqual(writes, [])
+
+
+    def test_noise_estimate_interpolates_between_measured_levels(self):
+        autocal = AutoCal(FakeTV(), FakePattern(), None, FakeLog(), load_config())
+        self.assertEqual(autocal.noise(50), 0.0)
+        autocal._record_noise(20, 0.0004)
+        autocal._record_noise(100, 0.0002)
+        self.assertAlmostEqual(autocal.noise(20), 0.0004)
+        self.assertAlmostEqual(autocal.noise(60), 0.0003)
+        self.assertAlmostEqual(autocal.noise(10), 0.0004)
+
+    def test_report_renders_autocal_and_verification_results(self):
+        from report import build_report
+        config = load_config()
+        _, result, _, _ = self.realistic_run()
+        page = build_report(result, config, "Simulated AutoCal")
+        for text in ("Tint by level", "Predicted versus measured", "Controls per point",
+                     "Final verification", "Every move", "detail_10", "<svg"):
+            self.assertIn(text, page)
+        verification = {"measurements": result["final"], "summary": result["final_summary"]}
+        page = build_report(verification, config, "Simulated verification")
+        self.assertIn("Final verification", page)
+        self.assertNotIn("Every move", page)
 
 if __name__ == "__main__":
     unittest.main()

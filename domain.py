@@ -30,6 +30,12 @@ class Measurement:
     read_count: int
     uv_noise: float = 0.0
     y_noise: float = 0.0
+    # Fraction of full scale actually drawn (8-bit code), None = level/100.
+    signal: float | None = None
+
+    @property
+    def signal_fraction(self) -> float:
+        return self.level / 100.0 if self.signal is None else self.signal
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -44,15 +50,14 @@ class ErrorMetrics:
 
 
 @dataclass(frozen=True)
-class ControlProposal:
-    values: Mapping[str, int]
-    raw_move: tuple[float, ...]
-    applied_move: tuple[int, ...]
+class TintScore:
+    """u'v' distance from D65 over a set of readings."""
+    rms: float
+    maximum: float
 
 
 @dataclass(frozen=True)
-class Evaluation:
-    chroma_score: float
-    gamma_score: float
-    maximum_chroma_delta_e: float
-
+class MovePlan:
+    values: Mapping[str, int]
+    move: tuple[int, ...]
+    predicted_error: tuple[float, float]

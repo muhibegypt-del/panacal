@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 
-from domain import ErrorMetrics, Evaluation, Measurement, XYZ
+from domain import ErrorMetrics, Measurement, TintScore, XYZ
 
 
 D65_XY = (0.3127, 0.3290)
@@ -32,6 +32,42 @@ def xyz_to_uv(xyz: XYZ) -> tuple[float, float]:
 
 
 D65_UV = xy_to_uv(*D65_XY)
+
+
+def signal_code(level: float, signal_range: str = "full") -> int:
+    """8-bit code for a percentage stimulus, rounded half-up like pattern generators."""
+    p = min(1.0, max(0.0, float(level) / 100.0))
+    if signal_range == "limited":
+        return int(16 + 219 * p + 0.5)
+    if signal_range == "full":
+        return int(255 * p + 0.5)
+    raise ValueError(f"Unknown signal range: {signal_range}")
+
+
+def code_fraction(code: int, signal_range: str = "full") -> float:
+    """Fraction of reference white that an 8-bit code actually represents."""
+    if signal_range == "limited":
+        return (int(code) - 16) / 219.0
+    if signal_range == "full":
+        return int(code) / 255.0
+    raise ValueError(f"Unknown signal range: {signal_range}")
+
+
+def uv_error(measurement: Measurement) -> tuple[float, float]:
+    return measurement.u - D65_UV[0], measurement.v - D65_UV[1]
+
+
+def tint(measurement: Measurement) -> float:
+    """Distance from D65 in CIE 1976 u'v', independent of luminance."""
+    return math.hypot(*uv_error(measurement))
+
+
+def tint_score(measurements: Iterable[Measurement]) -> TintScore:
+    values = [tint(row) for row in measurements]
+    if not values:
+        raise ValueError("At least one measurement is required")
+    return TintScore(rms=math.sqrt(sum(v * v for v in values) / len(values)),
+                     maximum=max(values))
 
 
 def xyz_to_lab(xyz: XYZ, white: XYZ = D65_XYZ) -> tuple[float, float, float]:
@@ -94,13 +130,13 @@ def delta_e_2000(lab1: tuple[float, float, float],
     return math.sqrt(max(0.0, l*l + c*c + h*h + RT*c*h))
 
 
-def power_target_y(level: int, black_y: float, white_y: float,
+def power_target_y(level: float, black_y: float, white_y: float,
                    gamma: float = 2.4) -> float:
     p = min(1.0, max(0.0, level / 100.0))
     return black_y + (white_y - black_y) * p**gamma
 
 
-def bt1886_target_y(level: int, black_y: float, white_y: float,
+def bt1886_target_y(level: float, black_y: float, white_y: float,
                     gamma: float = 2.4) -> float:
     """ITU-R BT.1886 EOTF anchored to the measured black and white."""
     if black_y < 0 or white_y <= black_y:
@@ -111,7 +147,7 @@ def bt1886_target_y(level: int, black_y: float, white_y: float,
     return ((white_root - black_root) * p + black_root) ** gamma
 
 
-def target_y(level: int, black_y: float, white_y: float,
+def target_y(level: float, black_y: float, white_y: float,
              curve: str = "power", gamma: float = 2.4) -> float:
     if curve == "power":
         return power_target_y(level, black_y, white_y, gamma)
@@ -134,7 +170,7 @@ def chroma_delta_e(measurement: Measurement, white_y: float) -> float:
 
 def metrics(measurement: Measurement, black_y: float, white_y: float,
             curve: str = "power", gamma: float = 2.4) -> ErrorMetrics:
-    desired_y = target_y(measurement.level, black_y, white_y, curve, gamma)
+    desired_y = target_y(100.0 * measurement.signal_fraction, black_y, white_y, curve, gamma)
     log_error = 0.0
     if measurement.level > 0:
         log_error = math.log(max(measurement.xyz.Y, 1e-12) / max(desired_y, 1e-12))
@@ -146,29 +182,6 @@ def metrics(measurement: Measurement, black_y: float, white_y: float,
         chroma_delta_e=chroma_delta_e(measurement, white_y),
         target_y=desired_y,
         log_y_error=log_error,
-    )
-
-
-def evaluate(measurements: Iterable[Measurement], black_y: float, white_y: float,
-             curve: str = "power", gamma: float = 2.4,
-             weights: Mapping[int, float] | None = None) -> Evaluation:
-    rows = list(measurements)
-    if not rows:
-        raise ValueError("At least one measurement is required")
-    values = [(row, metrics(row, black_y, white_y, curve, gamma)) for row in rows]
-    effective_weights = [max(0.0, (weights or {}).get(row.level, 1.0)) for row, _ in values]
-    total_weight = sum(effective_weights)
-    if total_weight <= 0:
-        raise ValueError("Evaluation weights must contain a positive value")
-    chroma_mse = sum(w * item.chroma_delta_e**2
-                     for w, (_, item) in zip(effective_weights, values)) / total_weight
-    gamma_mse = sum(w * item.log_y_error**2
-                    for w, (_, item) in zip(effective_weights, values)
-                    if item.target_y > black_y) / total_weight
-    return Evaluation(
-        chroma_score=math.sqrt(chroma_mse),
-        gamma_score=math.sqrt(gamma_mse),
-        maximum_chroma_delta_e=max(item.chroma_delta_e for _, item in values),
     )
 
 

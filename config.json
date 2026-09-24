@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "tv": {
     "default_ip": "192.168.1.105",
     "mode": "DAY",
@@ -29,7 +29,7 @@
       "R:60"
     ],
     "reads": {
-      "black": 2,
+      "black": 1,
       "shadow": 3,
       "normal": 1,
       "white": 3
@@ -46,9 +46,9 @@
   },
   "solver": {
     "response_step_rgb": 6,
-    "gain_rgb": 0.7,
-    "white_balance_stop_delta_e": 0.45,
-    "white_balance_minimum_improvement": 0.03,
+    "white_balance_stop_uv": 0.0005,
+    "white_balance_minimum_improvement_uv": 0.00015,
+    "model_update_weight": 0.5,
     "two_point_iterations": 4,
     "detail_iterations": 4
   },
