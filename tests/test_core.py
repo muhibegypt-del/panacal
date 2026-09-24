@@ -14,8 +14,7 @@ from colour import (D65_UV, D65_XYZ, bt1886_target_y, delta_e_2000,
 from domain import Measurement, XYZ
 from hardware import PatternHost, TVSession
 from autocal import connect_tv, validate_signal_path
-from solver import (gamma_improved, propose_gamma, propose_red_blue,
-                    white_balance_improved)
+from solver import propose_red_blue, white_balance_improved
 
 
 def measurement(level: int, xyz: XYZ) -> Measurement:
@@ -96,20 +95,9 @@ class SolverTests(unittest.TestCase):
             self.assertTrue(all(-50 <= value <= 50 for value in proposal.values.values()))
             self.assertTrue(all(-4 <= move <= 4 for move in proposal.applied_move))
 
-    def test_gamma_proposal_moves_in_correct_direction(self):
-        low = measurement(50, XYZ(0.18, 0.18, 0.18))
-        raised = propose_gamma(0, low, desired_y=0.20,
-                               log_y_response_per_step=0.01, cap=12, gain=0.75)
-        lowered = propose_gamma(0, low, desired_y=0.16,
-                                log_y_response_per_step=0.01, cap=12, gain=0.75)
-        self.assertGreater(raised, 0)
-        self.assertLess(lowered, 0)
-
     def test_acceptance_requires_real_improvement(self):
         self.assertTrue(white_balance_improved(1.0, 0.8, 0.03))
         self.assertFalse(white_balance_improved(1.0, 0.99, 0.03))
-        self.assertTrue(gamma_improved(0.10, 0.05, 0.7, 0.75, 0.004, 0.10))
-        self.assertFalse(gamma_improved(0.10, 0.05, 0.7, 0.90, 0.004, 0.10))
 
 
 class ConfigurationTests(unittest.TestCase):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Panasonic GT60/VT60 grayscale and gamma AutoCal V4."""
+"""Panasonic GT60/VT60 grayscale white-balance AutoCal V4."""
 from __future__ import annotations
 
 import argparse
@@ -11,16 +11,15 @@ import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-from colour import D65_UV, evaluate, metrics, target_y
+from colour import D65_UV, evaluate, metrics
 from domain import Evaluation, Measurement
 from hardware import Meter, PatternHost, TVSession, Transcript, measure
-from solver import (UnusableResponse, gamma_improved, propose_gamma,
-                    propose_red_blue, white_balance_improved)
+from solver import UnusableResponse, propose_red_blue, white_balance_improved
 
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
-# The TV has 10 grayscale/gamma points, so measure only where it can be
+# The TV has 10 grayscale points, so measure only where it can be
 # corrected. Slot 100 acts on the 95% patch; 100% is set by two-point high.
 MEASURE_LEVELS = (0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100)
 DETAIL_SLOTS = tuple(range(10, 101, 10))
@@ -290,10 +289,7 @@ class AutoCal:
         slot = 100
         self.tv.select_point(slot)
         original = self.tv.get_number(code)
-        if code == "PC:GGN":
-            step_size = int(self.solver_config["response_step_gamma"])
-        else:
-            step_size = int(self.solver_config["response_step_rgb"])
+        step_size = int(self.solver_config["response_step_rgb"])
         trial = original + step_size if original <= 50 - step_size else original - step_size
         step = trial - original
         before95 = self.read(95, f"{family}_slot100_map_95_before", fast=True)
@@ -308,16 +304,13 @@ class AutoCal:
         restored100 = self.read(100, f"{family}_slot100_map_100_restored", fast=True)
 
         def effect(before: Measurement, changed: Measurement, restored: Measurement) -> float:
-            if code == "PC:GGN":
-                reference_y = math.sqrt(max(before.xyz.Y, 1e-12) * max(restored.xyz.Y, 1e-12))
-                return abs(math.log(max(changed.xyz.Y, 1e-12) / reference_y) / step)
             reference_u = (before.u + restored.u) / 2.0
             reference_v = (before.v + restored.v) / 2.0
             return math.hypot(changed.u - reference_u, changed.v - reference_v) / abs(step)
 
         effect95 = effect(before95, changed95, restored95)
         effect100 = effect(before100, changed100, restored100)
-        noise_floor = 0.0003 if code == "PC:GGN" else 0.00002
+        noise_floor = 0.00002
         confirmed = effect95 > max(noise_floor, effect100 * 1.15)
         result = {
             "family": family,
@@ -335,98 +328,6 @@ class AutoCal:
         )
         return result
 
-    def optimise_gamma(self, slot: int, primary: int, affected: list[int],
-                       cap: int, iterations: int) -> list[dict]:
-        history = []
-        for iteration in range(1, iterations + 1):
-            self.tv.select_point(slot)
-            current = self.tv.get_number("PC:GGN")
-            before_rows = self.read_levels(affected, f"gamma_{slot}_before_{iteration}")
-            before_score = self.score(before_rows)
-            primary_before = {row.level: row for row in before_rows}[primary]
-            desired_y = target_y(primary, self.black_y, self.white_y, self.curve, self.gamma)
-            primary_error = abs(math.log(max(primary_before.xyz.Y, 1e-12) / max(desired_y, 1e-12)))
-            if primary_error <= float(self.solver_config["gamma_stop_log_error"]):
-                history.append({"iteration": iteration, "accepted": False,
-                                "reason": "within_target", "control": current,
-                                "measurements": before_rows, "score": before_score})
-                break
-
-            step_size = int(self.solver_config["response_step_gamma"])
-            trial = current + step_size if current <= 50 - step_size else current - step_size
-            step = trial - current
-            self.tv.select_point(slot)
-            self.tv.set_number("PC:GGN", trial)
-            changed = self.read(primary, f"gamma_{slot}_trial", fast=True)
-            self.tv.select_point(slot)
-            self.tv.set_number("PC:GGN", current)
-            restored = self.read(primary, f"gamma_{slot}_restored", fast=True)
-            reference_y = math.sqrt(max(primary_before.xyz.Y, 1e-12) * max(restored.xyz.Y, 1e-12))
-            response = math.log(max(changed.xyz.Y, 1e-12) / reference_y) / step
-
-            reference_rows = self.read_levels(affected, f"gamma_{slot}_reference_{iteration}")
-            reference_score = self.score(reference_rows)
-            reference = {row.level: row for row in reference_rows}[primary]
-            try:
-                candidate_value = propose_gamma(
-                    current=current,
-                    baseline=reference,
-                    desired_y=desired_y,
-                    log_y_response_per_step=response,
-                    cap=cap,
-                    gain=float(self.solver_config["gain_gamma"]),
-                )
-            except UnusableResponse as exc:
-                history.append({"iteration": iteration, "accepted": False,
-                                "reason": str(exc), "control": current,
-                                "response": response, "score": reference_score})
-                break
-            if candidate_value == current:
-                history.append({"iteration": iteration, "accepted": False,
-                                "reason": "no_integer_move", "control": current,
-                                "response": response, "score": reference_score})
-                break
-
-            self.tv.select_point(slot)
-            self.tv.set_number("PC:GGN", candidate_value)
-            candidate_rows = self.read_levels(affected, f"gamma_{slot}_candidate_{iteration}")
-            candidate_score = self.score(candidate_rows)
-            monotonic = all(left.xyz.Y < right.xyz.Y
-                            for left, right in zip(candidate_rows, candidate_rows[1:]))
-            accepted = monotonic and gamma_improved(
-                reference_score.gamma_score,
-                candidate_score.gamma_score,
-                reference_score.chroma_score,
-                candidate_score.chroma_score,
-                float(self.solver_config["gamma_minimum_improvement"]),
-                float(self.solver_config["allowed_chroma_regression"]),
-            )
-            if not accepted:
-                self.tv.select_point(slot)
-                self.tv.set_number("PC:GGN", current)
-            self.log.write(
-                f"DECISION gamma slot={slot} mapped={primary}% "
-                f"{'ACCEPT' if accepted else 'RESTORE'} "
-                f"error={reference_score.gamma_score:.4f}->{candidate_score.gamma_score:.4f} "
-                f"chroma={reference_score.chroma_score:.3f}->{candidate_score.chroma_score:.3f}"
-            )
-            history.append({
-                "iteration": iteration,
-                "accepted": accepted,
-                "control_before": current,
-                "candidate_value": candidate_value,
-                "response_log_y_per_step": response,
-                "desired_y": desired_y,
-                "reference_measurements": reference_rows,
-                "reference_score": reference_score,
-                "candidate_measurements": candidate_rows,
-                "candidate_score": candidate_score,
-                "monotonic": monotonic,
-            })
-            if not accepted:
-                break
-        return history
-
     def run(self) -> dict:
         result = {"version": 4, "workflow": "direct_two_point", "stages": {}}
         self.log.write("START TWO-POINT: measuring white, then correcting RGB; no opening sweep")
@@ -434,8 +335,8 @@ class AutoCal:
         if white.xyz.Y <= 0:
             raise RuntimeError("Cannot calibrate: the white patch has no positive luminance")
         self.white_y = white.xyz.Y
-        # White-balance scoring compares D65 at each reading's own luminance.
-        # Black is only needed later when establishing the gamma target.
+        # White-balance scoring compares D65 at each reading's own luminance,
+        # so black is only measured by the final verification sweep.
         result["starting_white"] = white
 
         two_iterations = int(self.solver_config["two_point_iterations"])
@@ -473,28 +374,6 @@ class AutoCal:
             "final_high", 100, [80, 90, 95, 100], ("WB:HIR", "WB:HIB"),
             None, cap=2, iterations=1,
         )
-
-        anchors = self.read_levels([0, 100], "post_white_balance_anchors")
-        self.black_y = next(row.xyz.Y for row in anchors if row.level == 0)
-        self.white_y = next(row.xyz.Y for row in anchors if row.level == 100)
-        gamma_slot100 = self.verify_slot_100_mapping("PC:GGN", "gamma")
-        result["stages"]["gamma_slot100_mapping"] = gamma_slot100
-        gamma_iterations = int(self.solver_config["gamma_iterations"])
-        gamma_results = []
-        for slot in DETAIL_SLOTS:
-            if slot == 100 and not gamma_slot100["confirmed_95_dominant"]:
-                gamma_results.append({"slot": slot, "skipped": "95_mapping_not_confirmed"})
-                continue
-            primary = 95 if slot == 100 else slot
-            affected = [primary]
-            gamma_results.append({
-                "slot": slot,
-                "primary": primary,
-                "history": self.optimise_gamma(
-                    slot, primary, affected, cap=12, iterations=gamma_iterations
-                ),
-            })
-        result["stages"]["gamma"] = gamma_results
 
         final = self.sweep("final_verification")
         result["final"] = final

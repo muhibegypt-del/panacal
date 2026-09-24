@@ -46,17 +46,11 @@
   },
   "solver": {
     "response_step_rgb": 6,
-    "response_step_gamma": 8,
     "gain_rgb": 0.7,
-    "gain_gamma": 0.75,
     "white_balance_stop_delta_e": 0.45,
     "white_balance_minimum_improvement": 0.03,
-    "gamma_stop_log_error": 0.01,
-    "gamma_minimum_improvement": 0.004,
-    "allowed_chroma_regression": 0.1,
     "two_point_iterations": 4,
-    "detail_iterations": 4,
-    "gamma_iterations": 4
+    "detail_iterations": 4
   },
   "signal_guard": {
     "maximum_black_white_ratio": 0.001,

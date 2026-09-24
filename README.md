@@ -1,6 +1,6 @@
 # Panasonic GT60 / VT60 Grayscale AutoCal V4
 
-This version calibrates grayscale and gamma only. It does not touch the colour-management system.
+This version calibrates grayscale white balance (D65 at every level) only. It does not adjust the 10-point gamma controls or the colour-management system; gamma comes from the TV's Gamma 2.4 preset, and existing 10-point gamma values are left exactly as they are.
 
 ## Before you run
 
@@ -21,12 +21,12 @@ V4 starts from your current settings in the configured ISF Day mode:
 2. Initialises the Spyder5 with the Plasma CCSS and 60 Hz refresh setting.
 3. Saves your current TV settings for recovery and saves/linearises the PC video LUT. Existing picture and grayscale settings are used as the calibration starting point.
 4. Reads white once and starts two-point high correction using that reading. Small red/blue probes measure the TV's response; the solver calculates the correction, applies it, and checks the result.
-5. Corrects the low end at 10%, then continues with detailed white balance and gamma.
+5. Corrects the low end at 10%, then continues with the 10-point white balance.
 6. Runs one verification sweep at the end (0%, the ten control points 10–90% and 95%, and 100%) and checks measured black/shadow/headroom symptoms.
 
-There is no opening 0-100% sweep and no separate discarded meter-check reading. Two-point correction reuses the first white reading, the restored response measurement, and the latest accepted measurement at unchanged controls. Measurements at affected levels still check that a proposed change improves the overall result. Black is measured later when the gamma stage needs its luminance target.
+There is no opening 0-100% sweep and no separate discarded meter-check reading. Two-point correction reuses the first white reading, the restored response measurement, and the latest accepted measurement at unchanged controls. Measurements at affected levels still check that a proposed change improves the overall result. Black is measured only by the final verification sweep.
 
-Measurements are taken only at levels the TV can correct. The Panasonic has a 10-point grayscale and gamma control, so 5% and the in-between 15/25/…/85% patches are never measured. Slot 100 acts on the 95% patch, so 95% is measured for that slot and 100% is set by two-point high.
+Measurements are taken only at levels the TV can correct. The Panasonic has a 10-point grayscale control, so 5% and the in-between 15/25/…/85% patches are never measured. Slot 100 acts on the 95% patch, so 95% is measured for that slot and 100% is set by two-point high.
 
 Each control receives up to four bounded correction attempts, but stops early as soon as it reaches target or stops improving. Every proposed change is measured before it is accepted. A rejected change is immediately restored. If any setup or calibration stage fails, V4 restores the complete original TV snapshot and the saved Panasonic video LUT.
 
@@ -34,9 +34,9 @@ Each control receives up to four bounded correction attempts, but stops early as
 
 The console prints:
 
-- average grayscale plus gamma dE2000;
+- average grayscale plus gamma dE2000 (includes luminance error from the uncorrected gamma preset);
 - maximum dE2000 and the IRE where it occurred;
-- chroma-only average dE2000;
+- chroma-only average dE2000 — the white-point accuracy this AutoCal controls;
 - median measured gamma.
 
 The complete evidence is saved in a timestamped folder under `sessions`:

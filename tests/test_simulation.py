@@ -123,7 +123,6 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         config["meter"]["reads"] = {"black": 1, "shadow": 1, "normal": 1, "white": 1}
         config["solver"]["two_point_iterations"] = 1
         config["solver"]["detail_iterations"] = 1
-        config["solver"]["gamma_iterations"] = 1
         pattern = FakePattern()
         tv = FakeTV()
         meter = FakeMeter(pattern, tv)
@@ -137,7 +136,6 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         self.assertNotIn("baseline_summary", result)
         after = result["final_summary"]
         self.assertTrue(result["stages"]["white_balance_slot100_mapping"]["confirmed_95_dominant"])
-        self.assertTrue(result["stages"]["gamma_slot100_mapping"]["confirmed_95_dominant"])
         self.assertLess(after["average_chroma_delta_e_2000"],
                         before["average_chroma_delta_e_2000"])
         self.assertLess(after["maximum_chroma_delta_e_2000"],
@@ -153,7 +151,7 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         config = load_config()
         config["pattern"]["settle_seconds"] = 0
         config["meter"]["reads"] = {"black": 1, "shadow": 1, "normal": 1, "white": 1}
-        config["solver"].update(two_point_iterations=1, detail_iterations=1, gamma_iterations=1)
+        config["solver"].update(two_point_iterations=1, detail_iterations=1)
         pattern, tv, log = FakePattern(), FakeTV(), FakeLog()
         tv.two["WB:HIR"] = 20
         tv.two["WB:HIB"] = -20
