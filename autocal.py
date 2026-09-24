@@ -20,7 +20,9 @@ from solver import (UnusableResponse, gamma_improved, propose_gamma,
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
-MEASURE_LEVELS = tuple(range(0, 101, 5))
+# The TV has 10 grayscale/gamma points, so measure only where it can be
+# corrected. Slot 100 acts on the 95% patch; 100% is set by two-point high.
+MEASURE_LEVELS = (0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100)
 DETAIL_SLOTS = tuple(range(10, 101, 10))
 
 
@@ -82,9 +84,9 @@ def validate_meter_configuration(config: dict) -> None:
 def validate_signal_path(rows: list[Measurement], config: dict) -> dict:
     """Check measured black/shadow/headroom symptoms in a verification sweep."""
     by_level = {row.level: row for row in rows}
-    required = (0, 5, 95, 100)
+    required = (0, 10, 95, 100)
     if any(level not in by_level for level in required):
-        raise RuntimeError("Signal-path guard requires 0, 5, 95 and 100 percent measurements")
+        raise RuntimeError("Signal-path guard requires 0, 10, 95 and 100 percent measurements")
     black = by_level[0].xyz.Y
     white = by_level[100].xyz.Y
     span = white - black
@@ -92,15 +94,15 @@ def validate_signal_path(rows: list[Measurement], config: dict) -> dict:
         raise RuntimeError("Signal-path guard found non-positive white-to-black luminance span")
     evidence = {
         "black_white_ratio": black / white,
-        "five_percent_above_black": (by_level[5].xyz.Y - black) / span,
+        "ten_percent_above_black": (by_level[10].xyz.Y - black) / span,
         "headroom_above_95_percent": (white - by_level[95].xyz.Y) / span,
     }
     guard = config["signal_guard"]
     failures = []
     if evidence["black_white_ratio"] > float(guard["maximum_black_white_ratio"]):
         failures.append("black is raised")
-    if evidence["five_percent_above_black"] < float(guard["minimum_5_percent_above_black"]):
-        failures.append("5% is crushed")
+    if evidence["ten_percent_above_black"] < float(guard["minimum_10_percent_above_black"]):
+        failures.append("10% is crushed")
     if evidence["headroom_above_95_percent"] < float(guard["minimum_headroom_above_95_percent"]):
         failures.append("95% is clipped")
     if failures:
@@ -137,7 +139,7 @@ class AutoCal:
         return self.read_levels(MEASURE_LEVELS, stage)
 
     def score(self, rows: list[Measurement]) -> Evaluation:
-        weights = {5: 0.35, 10: 0.70}
+        weights = {10: 0.70}
         return evaluate(rows, self.black_y, self.white_y, self.curve, self.gamma, weights)
 
     def _select(self, slot: int | None) -> None:
@@ -456,7 +458,7 @@ class AutoCal:
                 detail_results.append({"slot": slot, "skipped": "95_mapping_not_confirmed"})
                 continue
             primary = 95 if slot == 100 else slot
-            affected = sorted({max(5, primary - 5), primary, min(100, primary + 5)})
+            affected = [primary]
             detail_results.append({
                 "slot": slot,
                 "primary": primary,
@@ -484,7 +486,7 @@ class AutoCal:
                 gamma_results.append({"slot": slot, "skipped": "95_mapping_not_confirmed"})
                 continue
             primary = 95 if slot == 100 else slot
-            affected = sorted({max(5, primary - 5), primary, min(100, primary + 5)})
+            affected = [primary]
             gamma_results.append({
                 "slot": slot,
                 "primary": primary,

@@ -178,7 +178,7 @@ class SimulatedClosedLoopTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in sweep.call_args_list], ["final_verification"])
         self.assertEqual(result["workflow"], "direct_two_point")
         self.assertEqual(result["starting_white"].level, 100)
-        self.assertEqual([row.level for row in result["final"]], list(range(0, 101, 5)))
+        self.assertEqual([row.level for row in result["final"]], [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100])
 
     def test_two_point_reuses_reference_and_accepted_primary_readings(self):
         config = load_config()

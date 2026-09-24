@@ -196,7 +196,7 @@ class ConfigurationTests(unittest.TestCase):
         config = json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig"))
         rows = [
             measurement(0, XYZ(0.006, 0.007, 0.008)),
-            measurement(5, XYZ(0.08, 0.09, 0.10)),
+            measurement(10, XYZ(0.45, 0.48, 0.52)),
             measurement(95, XYZ(100.0, 105.0, 110.0)),
             measurement(100, XYZ(113.0, 120.0, 127.0)),
         ]
@@ -206,6 +206,10 @@ class ConfigurationTests(unittest.TestCase):
         raised[0] = measurement(0, XYZ(0.3, 0.325, 0.4))
         with self.assertRaisesRegex(RuntimeError, "black is raised"):
             validate_signal_path(raised, config)
+        crushed = list(rows)
+        crushed[1] = measurement(10, XYZ(0.02, 0.02, 0.02))
+        with self.assertRaisesRegex(RuntimeError, "10% is crushed"):
+            validate_signal_path(crushed, config)
 
 
 if __name__ == "__main__":

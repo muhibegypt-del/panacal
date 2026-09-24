@@ -22,9 +22,11 @@ V4 starts from your current settings in the configured ISF Day mode:
 3. Saves your current TV settings for recovery and saves/linearises the PC video LUT. Existing picture and grayscale settings are used as the calibration starting point.
 4. Reads white once and starts two-point high correction using that reading. Small red/blue probes measure the TV's response; the solver calculates the correction, applies it, and checks the result.
 5. Corrects the low end at 10%, then continues with detailed white balance and gamma.
-6. Runs one full 5% verification sweep at the end and checks measured black/shadow/headroom symptoms.
+6. Runs one verification sweep at the end (0%, the ten control points 10–90% and 95%, and 100%) and checks measured black/shadow/headroom symptoms.
 
 There is no opening 0-100% sweep and no separate discarded meter-check reading. Two-point correction reuses the first white reading, the restored response measurement, and the latest accepted measurement at unchanged controls. Measurements at affected levels still check that a proposed change improves the overall result. Black is measured later when the gamma stage needs its luminance target.
+
+Measurements are taken only at levels the TV can correct. The Panasonic has a 10-point grayscale and gamma control, so 5% and the in-between 15/25/…/85% patches are never measured. Slot 100 acts on the 95% patch, so 95% is measured for that slot and 100% is set by two-point high.
 
 Each control receives up to four bounded correction attempts, but stops early as soon as it reaches target or stops improving. Every proposed change is measured before it is accepted. A rejected change is immediately restored. If any setup or calibration stage fails, V4 restores the complete original TV snapshot and the saved Panasonic video LUT.
 
@@ -47,7 +49,7 @@ The complete evidence is saved in a timestamped folder under `sessions`:
 
 ## Verify without changing anything
 
-Double-click **Run Read-Only Verification V4.bat**. It performs the same 5% sweep and writes no calibration values.
+Double-click **Run Read-Only Verification V4.bat**. It performs the same 12-point sweep and writes no calibration values.
 
 ## After AutoCal
 

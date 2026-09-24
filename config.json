@@ -60,7 +60,7 @@
   },
   "signal_guard": {
     "maximum_black_white_ratio": 0.001,
-    "minimum_5_percent_above_black": 0.0001,
+    "minimum_10_percent_above_black": 0.001,
     "minimum_headroom_above_95_percent": 0.01
   }
 }
