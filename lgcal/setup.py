@@ -42,9 +42,11 @@ def progress_step(done: int, total: int) -> int:
     return done * 10 // total if total > 0 else done // (10 << 20)
 
 
-def download(url: str, target: Path, say, sha256: str = "") -> None:
-    """Download to target.part, check the SHA-256 when given, then rename.
-    A failed or interrupted download leaves nothing behind."""
+def download(url: str, target: Path, say, sha256=()) -> None:
+    """Download to target.part, check the SHA-256 when given (one value or
+    several accepted values), then rename. A failed or interrupted download
+    leaves nothing behind."""
+    accepted = {sha256.lower()} if isinstance(sha256, str) and sha256 else {s.lower() for s in sha256 or ()}
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(target.suffix + ".part")
     digest = hashlib.sha256()
@@ -60,7 +62,7 @@ def download(url: str, target: Path, say, sha256: str = "") -> None:
                     shown = progress_step(done, total)
                     say(f"  {target.name}: {done * 100 // total}%" if total else
                         f"  {target.name}: {done >> 20} MB")
-        if sha256 and digest.hexdigest().lower() != sha256.lower():
+        if accepted and digest.hexdigest().lower() not in accepted:
             raise SystemExit(f"The download of {target.name} was damaged (checksum mismatch). Run again.")
         os.replace(partial, target)
     except OSError as exc:
@@ -114,18 +116,24 @@ def perl_candidates(settings: dict, cache: dict) -> list[str]:
     return [p for p in found if p and (Path(p).is_file() or shutil.which(p))]
 
 
-def portable_zip(releases) -> tuple[str, str]:
-    """(url, sha256) of the newest 64-bit portable Strawberry Perl in
-    releases.json, or ("", ""). The edition labels in that file are not
-    reliable, so the file name decides."""
+def portable_zip(releases) -> tuple[str, set]:
+    """(url, accepted sha256 values) of the newest 64-bit portable Strawberry
+    Perl in releases.json, or ("", set()).
+
+    releases.json shuffles its entries: in the 5.40.5.1 release the portable
+    zip's URL sits beside the PDL zip's checksum, and the zip's real checksum
+    sits beside the MSI's URL. So the file name picks the URL, and the
+    download must match one of the checksums published for that release (a
+    damaged download matches none of them)."""
     for release in releases if isinstance(releases, list) else []:
         if not isinstance(release, dict) or not str(release.get("archname", "")).startswith("MSWin32-x64"):
             continue
-        for entry in (release.get("edition") or {}).values():
-            url = str((entry or {}).get("url", ""))
+        entries = [e for e in (release.get("edition") or {}).values() if isinstance(e, dict)]
+        for entry in entries:
+            url = str(entry.get("url", ""))
             if url.endswith("-64bit-portable.zip"):
-                return url, str(entry.get("sha256", ""))
-    return "", ""
+                return url, {str(e["sha256"]).lower() for e in entries if e.get("sha256")}
+    return "", set()
 
 
 def install_perl(say) -> str:

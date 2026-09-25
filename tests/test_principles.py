@@ -112,9 +112,46 @@ class PureDecisions(unittest.TestCase):
             "msi": {"url": "https://x/strawberry-perl-5.40.5.1-64bit.msi"},
             "portable": {"url": "https://x/strawberry-perl-5.40.5.1-64bit.msi"},
             "pdl": {"url": "https://x/strawberry-perl-5.40.5.1-64bit-portable.zip", "sha256": "ab"}}}]
-        self.assertEqual(setup.portable_zip(releases), ("https://x/strawberry-perl-5.40.5.1-64bit-portable.zip", "ab"))
-        self.assertEqual(setup.portable_zip([]), ("", ""))
-        self.assertEqual(setup.portable_zip("garbage"), ("", ""))
+        self.assertEqual(setup.portable_zip(releases),
+                         ("https://x/strawberry-perl-5.40.5.1-64bit-portable.zip", {"ab"}))
+        self.assertEqual(setup.portable_zip([]), ("", set()))
+        self.assertEqual(setup.portable_zip("garbage"), ("", set()))
+
+    def test_real_releases_json_shuffle_accepts_the_real_zip(self):
+        # strawberryperl.com releases.json, Sep 2026 / 5.40.5.1, as published:
+        # the portable zip's real checksum (6619fe7e..., 304,297,789 bytes,
+        # verified by download) sits beside the MSI's URL.
+        release = [{"archname": "MSWin32-x64-multi-thread", "edition": {
+            "msi": {"url": "https://g/strawberry-perl-5.40.5.1-64bit.msi", "sha256": "dcd84b77"},
+            "pdl": {"url": "https://g/strawberry-perl-5.40.5.1-64bit-portable.zip", "sha256": "3180b743"},
+            "portable": {"url": "https://g/strawberry-perl-5.40.5.1-64bit.msi", "sha256": "6619FE7E"}}}]
+        url, accepted = setup.portable_zip(release)
+        self.assertTrue(url.endswith("-portable.zip"))
+        self.assertIn("6619fe7e", accepted)
+
+    def test_download_checks_against_accepted_checksums(self):
+        import hashlib
+        body = b"strawberry"
+        good = hashlib.sha256(body).hexdigest()
+
+        class Response(io.BytesIO):
+            headers = {"Content-Length": str(len(body))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        with mock.patch("urllib.request.urlopen", return_value=Response(body)):
+            setup.download("https://x/a.zip", directory / "a.zip", lambda _m: None, {"0000", good.upper()})
+        self.assertEqual((directory / "a.zip").read_bytes(), body)
+        with mock.patch("urllib.request.urlopen", return_value=Response(body)):
+            with self.assertRaisesRegex(SystemExit, "damaged"):
+                setup.download("https://x/b.zip", directory / "b.zip", lambda _m: None, {"0000"})
+        self.assertFalse((directory / "b.zip").exists())
         page = ('<a href="https://www.argyllcms.com/Argyll_V3.4.0_win64_exe.zip">'
                 '<a href="https://www.argyllcms.com/Argyll_V3.5.0_win64_exe.zip">')
         self.assertTrue(setup.latest_argyll_link(page).endswith("V3.5.0_win64_exe.zip"))
