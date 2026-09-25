@@ -76,6 +76,23 @@ class StepsTests(unittest.TestCase):
             build_config({"picture_mode": "ISF Bright"})
 
 
+class PictureModeTests(unittest.TestCase):
+    class LGStub:
+        def __init__(self, mode):
+            self.mode = mode
+
+        def current_picture_mode(self):
+            return self.mode
+
+    def test_reported_mode_is_used(self):
+        self.assertEqual(app.choose_picture_mode(self.LGStub("filmMaker"), {}, ask=lambda _p: self.fail()),
+                         "filmMaker")
+
+    def test_unreported_mode_is_asked_not_guessed(self):
+        answers = iter(["x", "0", "3"])
+        self.assertEqual(app.choose_picture_mode(self.LGStub(""), {}, ask=lambda _p: next(answers)), "cinema")
+
+
 class MetricTests(unittest.TestCase):
     @unittest.skipUnless(PERL, "needs perl")
     def test_delta_e_itp_matches_the_worker(self):
@@ -309,8 +326,38 @@ class SimulationTests(unittest.TestCase):
     def test_full_range_tv(self):
         result = self.simulate(tv_mode="expert2")
         self.assert_calibrated(*result)
-        self.assertIn("full-range", result[3])
-        self.assertIn("Expert (Dark Room)", result[3])
+        code, state, tv, console, _ = result
+        self.assertIn("full-range", console)
+        self.assertIn("Expert (Dark Room)", console)
+        # The wizard's preparation, in its order, before the worker starts.
+        prep = [a for a in tv.requests if a in ("picture_reset", "picture_set", "sdr_calman_reset",
+                                                  "1d_dpg_upload")]
+        self.assertEqual(prep[:3], ["picture_reset", "picture_set", "sdr_calman_reset"])
+        # The reset put OLED brightness to factory; the user's value is back.
+        self.assertEqual(tv.backlight, tv.USER_BACKLIGHT)
+
+    def test_leftover_calibration_is_cleared_first(self):
+        from tests.sim.sim_tv import Panel, SimTV, identity
+        from lgcal.prepare import prepare
+        tv = SimTV(Panel())
+        self.assertNotAlmostEqual(tv.panel.dpg[2][500], identity(500))
+
+        class Direct:  # the LG routes, answered straight by the simulated TV
+            def picture_settings(self, payload):
+                return tv.handle({"action": "picture_get", **payload})
+
+            def picture_reset(self, payload):
+                return tv.handle({"action": "picture_reset", **payload})
+
+            def picture_settings_set(self, payload):
+                return tv.handle({"action": "picture_set", **payload})
+
+            def sdr_calman_reset(self, payload):
+                return tv.handle({"action": "sdr_calman_reset", **payload})
+
+        prepare(Direct(), "expert2", "Expert (Dark Room)", lambda _m: None, sleep=lambda _s: None)
+        self.assertAlmostEqual(tv.panel.dpg[2][500], identity(500))
+        self.assertEqual(tv.backlight, tv.USER_BACKLIGHT)
 
     def test_tv_on_black_level_low_gets_limited_patterns(self):
         result = self.simulate(black_level="low")

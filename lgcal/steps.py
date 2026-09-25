@@ -126,11 +126,24 @@ def build_config(settings: dict, white_luminance: float | None = None, *, limite
         "lg_autocal_26_full_ddc_spine": True,
         "lg_autocal_26_anchor_predrive": False,
         "lg_extended_sdr_16_255": False,
-        "patch_insert": False,
-        "patch_insert_patch_code": 0,
-        "patch_insert_patch_input_max": 255,
-        "patch_insert_time_code": 0,
-        "patch_insert_time_input_max": 255,
+        # Pattern insertion as the dashboard sends it for OLED (on; 1 s 10%
+        # flash per reading, 5 s 25% flash every 45 s). The worker itself
+        # switches it off on the 8-bit path (apply_lg_autocal_26_default_modes)
+        # and uses it only with its 10-bit headroom ladder.
+        "patch_insert": bool(settings.get("pattern_insertion", True)),
+        "patch_insert_patch_enabled": True,
+        "patch_insert_patch_every": 1,
+        "patch_insert_patch_duration_ms": 1000,
+        "patch_insert_patch_level": 10,
+        "patch_insert_time_enabled": True,
+        "patch_insert_time_frequency_ms": 45000,
+        "patch_insert_time_duration_ms": 5000,
+        "patch_insert_time_level": 25,
+        "pattern_delay_ms": 0,
+        "patch_insert_patch_code": code_for_slot(10, limited),
+        "patch_insert_patch_input_max": INPUT_MAX,
+        "patch_insert_time_code": code_for_slot(25, limited),
+        "patch_insert_time_input_max": INPUT_MAX,
         "target_delta_e": float(settings.get("target_delta_e", 0.5)),
         "delta_e_formula": "deitp",
         # The dashboard captures the current 100% white before starting and

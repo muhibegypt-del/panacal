@@ -23,6 +23,7 @@ from .display import DisplaySetup
 from .lg import LG
 from .meter import Meter
 from .patterns import PatternWindow
+from .prepare import clear_calibration, prepare
 from .server import Api, MeterService, make_server
 from .setup import find_argyll, find_ccss, find_perl, meter_command
 from .signal import Reader, detect_range, verify, wait_for_meter
@@ -57,8 +58,53 @@ class Log:
             self.file.close()
 
 
+CONSOLE: list = []   # open session console logs
+
+
 def say(message: str = "") -> None:
     print(message, flush=True)
+    for handle in CONSOLE:
+        handle.write(message + "\n")
+        handle.flush()
+
+
+def free_port(preferred: int) -> int:
+    """The preferred local API port, or any free one if it is taken."""
+    import socket
+    for port in (preferred, 0):
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                return sock.getsockname()[1]
+            except OSError:
+                continue
+    return preferred
+
+
+def keep_awake(on: bool) -> None:
+    """Stop Windows blanking the TV or sleeping during a 30-minute run with
+    no keyboard or mouse input (ES_CONTINUOUS | ES_SYSTEM_REQUIRED |
+    ES_DISPLAY_REQUIRED; cleared again afterwards)."""
+    if os.name != "nt":
+        return
+    import ctypes
+    ctypes.windll.kernel32.SetThreadExecutionState(0x80000003 if on else 0x80000000)
+
+
+def console_click_proof() -> None:
+    """Clicking a Windows console with QuickEdit on pauses the program until
+    a key is pressed; turn QuickEdit off for this window."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-10)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, (mode.value & ~0x0040) | 0x0080)
+    except Exception:
+        pass
 
 
 def load_settings(path: Path = SETTINGS) -> dict:
@@ -154,27 +200,38 @@ def wait_pin_state(path: Path, process, wanted: tuple, timeout: float) -> dict:
     return {"status": "error", "message": "The TV did not answer the pairing request in time."}
 
 
-def choose_picture_mode(lg: LG, settings: dict) -> str:
+def choose_picture_mode(lg: LG, settings: dict, ask=input) -> str:
     mode = settings.get("picture_mode") or lg.current_picture_mode()
     if mode in PICTURE_MODES:
         say(f"Calibrating the picture mode the TV is in: {MODE_NAMES.get(mode, mode)}")
         return mode
-    say(f"The TV is in a mode AutoCal cannot calibrate ({mode or 'unknown'}); "
-        "calibrating Expert (Dark Room) instead.")
-    return "expert2"
+    # Older sets (2021 and earlier) may not report their mode. Calibrating
+    # a mode the TV is not showing would measure nothing useful, so ask.
+    say(f"The TV did not report a picture mode AutoCal can calibrate ({mode or 'none reported'}).")
+    choices = list(PICTURE_MODES)
+    for number, key in enumerate(choices, 1):
+        say(f"  {number}. {MODE_NAMES.get(key, key)}")
+    while True:
+        answer = ask("Which picture mode is the TV showing? Type its number: ").strip()
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
 
 
 # --- run --------------------------------------------------------------------
 
 def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl: str | None = None,
         session_dir: Path | None = None, extra_env: dict | None = None, config_overrides: dict | None = None,
-        delay_scale: float = 1.0, find_tv_on_network: bool = True, pin_input=input) -> int:
+        delay_scale: float = 1.0, find_tv_on_network: bool = True, pin_input=input,
+        reset_first: bool = True) -> int:
     """One complete AutoCal. The keyword hooks exist for the offline simulation."""
     session_dir = session_dir or SESSIONS / datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir.mkdir(parents=True, exist_ok=True)
     log = Log(session_dir / "autocal.log")
+    console = (session_dir / "console.txt").open("a", encoding="utf-8")
+    CONSOLE.append(console)
+    keep_awake(True)
     perl = perl or find_perl(settings, say)
-    port = int(settings.get("api_port") or 8765)
+    port = free_port(int(settings.get("api_port") or 8765))
     env = perl_env(session_dir, port, helper)
     env.update(extra_env or {})
     lg = LG(perl, helper, DATA_DIR, log, env)
@@ -188,7 +245,11 @@ def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl
             raise SystemExit("The TV is not paired.")
         if lg.clear_stale_calibration_mode():
             say("Closed a calibration session left open by an earlier run.")
-        picture_mode = choose_picture_mode(lg, settings)
+        picture_mode = choose_picture_mode(lg, settings, pin_input)
+        if reset_first:
+            prepare(lg, picture_mode, MODE_NAMES.get(picture_mode, picture_mode), say,
+                    sleep=lambda s: time.sleep(s * delay_scale),
+                    factory_reset=bool(settings.get("reset_picture_mode", True)))
 
         if pattern is None:
             argyll = find_argyll(settings, say)
@@ -201,6 +262,10 @@ def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl
                     + ("; Windows HDR turned off for the run" if state.get("hdr_changed") else ""))
                 if int(state.get("bits") or 8) > 8:
                     log(f"NOTE output is {state['bits']} bpc; 8-bit patterns are expanded by the GPU")
+                if state.get("night_light"):
+                    raise SystemExit("Windows Night light is on. It tints everything the PC sends, and the "
+                                     "calibration would bake that tint into the TV. Turn it off (Settings > "
+                                     "System > Display > Night light) and run again.")
             except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
                 log(f"DISPLAY automatic setup failed: {exc}")
                 say("Could not set up the display automatically; using the second screen as it is.")
@@ -210,7 +275,12 @@ def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl
             pattern.start()
             dispwin = argyll / "dispwin.exe"
             if dispwin.is_file():
-                pattern.linearize_video_lut(dispwin)
+                try:
+                    pattern.linearize_video_lut(dispwin)
+                except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                    log(f"PATTERN video LUT not linearised: {exc}")
+                    say("Note: could not reset the PC's video LUT for the TV; if a colour profile is "
+                        "loaded for it, results may be off.")
         if meter is None:
             argyll = find_argyll(settings, say)
             ccss = find_ccss(settings)
@@ -264,6 +334,15 @@ def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl
     except KeyboardInterrupt:
         say("Stopped.")
         return 1
+    except SystemExit as exc:
+        # A deliberate stop with a reason (lifted black, Night light, ...).
+        if not isinstance(exc.code, int):
+            say(str(exc.code))
+            return 2
+        raise
+    except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
+        say(f"Stopped: {exc}")
+        return 1
     finally:
         if worker is not None and worker.poll() is None:
             worker.kill()
@@ -277,6 +356,9 @@ def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl
                 resource.close()
             except Exception as exc:
                 log(f"close failed: {exc}")
+        keep_awake(False)
+        CONSOLE.remove(console)
+        console.close()
         log.close()
 
 
@@ -359,14 +441,22 @@ def report(state: dict) -> bool:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="LG OLED AutoCal on a PC (PGenerator-Plus worker)")
-    parser.add_argument("command", nargs="?", default="run", choices=["run", "pair"],
-                        help="run (default) or pair: only find and pair the TV")
+    parser.add_argument("command", nargs="?", default="run", choices=["run", "pair", "undo"],
+                        help="run (default); pair: only find and pair the TV; "
+                             "undo: return the TV's white balance and LUTs to factory")
     args = parser.parse_args(argv)
     settings = load_settings()
+    console_click_proof()
     try:
-        if args.command == "pair":
+        if args.command in ("pair", "undo"):
             perl = find_perl(settings, say)
-            find_tv(LG(perl, HELPER, DATA_DIR, Log(), perl_env(None, None)), settings)
+            lg = LG(perl, HELPER, DATA_DIR, Log(), perl_env(None, None))
+            find_tv(lg, settings)
+            if args.command == "undo":
+                lg.clear_stale_calibration_mode()
+                mode = choose_picture_mode(lg, settings)
+                clear_calibration(lg, mode, say)
+                say(f"{MODE_NAMES.get(mode, mode)} is back to the TV's factory white balance and LUTs.")
             return 0
         return run(settings)
     except (RuntimeError, OSError, ValueError, TimeoutError) as exc:

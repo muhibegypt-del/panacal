@@ -71,11 +71,21 @@ if ($tv.hdr_on) {
         if ($refreshed.Count -gt 0) { $tv = $refreshed[0] }
     }
 }
+# Night light tints the whole desktop warm through the GPU; a calibration
+# measured through it would bake the tint into the TV. Windows keeps its on
+# state in this CloudStore blob (byte 18 is 0x15 while it is on).
+$nightLight = $false
+try {
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\default$windows.data.bluelightreduction.bluelightreductionstate\windows.data.bluelightreduction.bluelightreductionstate'
+    $data = (Get-ItemProperty -LiteralPath $key -Name Data -ErrorAction Stop).Data
+    if ($data.Length -gt 18 -and $data[18] -eq 0x15) { $nightLight = $true }
+} catch { }
 $state = [ordered]@{
     device = $tv.gdi; name = $tv.name; primary = $tv.primary
     width = $tv.width; height = $tv.height; bits = $tv.bits; hdr_on = $tv.hdr_on
     adapter_low = $tv.adapter_low; adapter_high = $tv.adapter_high; target = $tv.target
     topology_before = $topology; topology_changed = $topologyChanged; hdr_changed = $hdrChanged
+    night_light = $nightLight
     outputs = @($outputs | ForEach-Object { "$($_.gdi) '$($_.name)' primary=$($_.primary)" })
 }
 $json = $state | ConvertTo-Json -Depth 3

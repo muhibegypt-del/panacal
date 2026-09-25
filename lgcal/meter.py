@@ -19,11 +19,13 @@ XYZ_RE = re.compile(r"Result is XYZ:\s*([-+\d.eE]+)\s+([-+\d.eE]+)\s+([-+\d.eE]+
 
 
 class Meter:
+    """read_timeout: a colorimeter can integrate for a long time near black;
+    the worker itself waits up to 210 s for a reading at 5% and below."""
     READY_PROMPT = "any other key to take a reading:"
     RETRY_PROMPT = "any other key to retry:"
 
     def __init__(self, command: list[str], log, *, startup_timeout: float = 30.0,
-                 read_timeout: float = 60.0):
+                 read_timeout: float = 150.0):
         self.command = [str(part) for part in command]
         self.log = log
         self.startup_timeout = startup_timeout

@@ -137,10 +137,18 @@ class SimTV:
              "hello_info": {"deviceUUID": "sim-uuid", "deviceOS": "webOS", "deviceType": "tv"},
              "software_info": {"device_id": "aa:bb:cc:dd:ee:ff", "product_name": "webOSTV 6.0"}}
 
-    def __init__(self, panel: Panel):
+    FACTORY_BACKLIGHT = 80
+    USER_BACKLIGHT = 55
+
+    def __init__(self, panel: Panel, leftover_calibration: bool = True):
         self.panel = panel
+        self.base_peak = panel.peak
         self.calibration_mode = False
         self.picture_mode = "expert1"
+        self.backlight = self.USER_BACKLIGHT
+        if leftover_calibration:
+            # An earlier calibration left a blue-heavy 1D LUT behind.
+            panel.dpg[2] = [v * 1.06 for v in panel.dpg[2]]
         self.wb = {"whiteBalanceRed": [0] * 26, "whiteBalanceGreen": [0] * 26,
                    "whiteBalanceBlue": [0] * 26, "adjustingLuminance": [0] * 26}
         self.requests: list[str] = []
@@ -148,7 +156,16 @@ class SimTV:
 
     def settings(self) -> dict:
         return {"pictureMode": self.picture_mode, "whiteBalanceMethod": "22", "whiteBalanceIre": "100",
-                **{k: list(v) for k, v in self.wb.items()}}
+                "backlight": self.backlight, **{k: list(v) for k, v in self.wb.items()}}
+
+    def set_backlight(self, value) -> None:
+        # OLED pixel brightness scales the whole light output.
+        self.backlight = int(value)
+        self.panel.peak = self.base_peak * self.backlight / self.USER_BACKLIGHT
+
+    def neutral(self) -> None:
+        self.wb = {k: [0] * 26 for k in self.wb}
+        self.panel.upload([identity(i) for _ in range(3) for i in range(1024)])
 
     def handle(self, request: dict) -> dict:
         action = request.get("action") or ""
@@ -169,6 +186,13 @@ class SimTV:
             settings = request.get("settings") or {}
             if settings.get("pictureMode"):
                 self.picture_mode = settings["pictureMode"]
+            if "backlight" in settings:
+                self.set_backlight(settings["backlight"])
+            if request.get("reset_ddc_baseline"):
+                self.neutral()
+                return {**ok, "picture_settings": self.settings(), "ddc_1d_lut": True,
+                        "ddc_baseline_reset": True, "ddc_reset_verified": True, "calibration_mode": True,
+                        "calibration_picture_mode": mode}
             for key in self.wb:
                 if isinstance(settings.get(key), list):
                     self.wb[key] = list(settings[key])
@@ -187,6 +211,15 @@ class SimTV:
             return {**ok, "uploaded": True, "ddc_1d_lut": True, "message": "1D DPG uploaded",
                     "cal_start_response": {"type": "response"}, "cal_end_response": {"type": "response"},
                     "active_picture_mode": mode, "calibration_picture_mode": mode}
+        if action == "picture_reset":
+            self.picture_mode = mode
+            self.neutral()
+            self.set_backlight(self.FACTORY_BACKLIGHT)
+            return {**ok, "picture_settings": self.settings(), "message": "picture mode reset"}
+        if action == "sdr_calman_reset":
+            self.neutral()
+            self.calibration_mode = False
+            return {**ok, "message": "SDR reference reset"}
         if action == "3d_lut_reset":
             return {**ok, "reset_to_unity": True, "message": "3D LUT reset"}
         return {"status": "error", "message": f"simulated TV does not implement {action}"}

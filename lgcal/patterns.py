@@ -110,10 +110,14 @@ class PatternWindow:
         listing = subprocess.run([str(dispwin), "-?"], capture_output=True, text=True,
                                  creationflags=NO_WINDOW, timeout=15)
         text = (listing.stdout or "") + "\n" + (listing.stderr or "")
-        wanted = self.device.upper().removeprefix("\\\\.\\")
+        def bare(name: str) -> str:
+            return name.strip().upper().replace("\\\\.\\", "")
+
+        wanted = bare(self.device)
         index = None
+        # dispwin -? lists e.g.  2 = 'DISPLAY2, at 1920, 0, width 3840, height 2160'
         for match in re.finditer(r"^\s*(\d+)\s*=\s*'([^,']+)", text, re.MULTILINE):
-            if match.group(2).strip().upper() == wanted:
+            if bare(match.group(2)) == wanted:
                 index = int(match.group(1))
         if index is None:
             raise RuntimeError(f"dispwin could not find the pattern display {self.device!r}")

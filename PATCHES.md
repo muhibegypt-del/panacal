@@ -56,5 +56,6 @@ Upstream maps legal black (code 16) to 128 instead of 64. That puts every entry 
 | `meter_session.sh` + `spotread` | `meter.py`: one persistent `spotread`. It follows meter_session.sh: draw the patch, wait `delay_ms`, read or average; code 0 is reported as synthetic black. |
 | WebUI routes in `webui.pm` / `lg.pm` | `server.py` and `lg.py`: the same routes and the same helper requests, timeouts, `clients.json` bookkeeping and held-calibration-mode rules as `lg.pm`. |
 | Dashboard wizard | `app.py` and `steps.py`: the same request body and 26-point step list the dashboard sends (SDR RGB, 8-bit, full or limited range). |
+| Wizard reset before AutoCal (`meterAutoCalResetDdc`) | `prepare.py`: picture-mode reset, verified DDC/1D LUT baseline reset and SDR reference reset, in the wizard's order with its 3 attempts; the OLED brightness read beforehand is written back (the wizard has the user dial it). `lg.py` ports the `picture-settings/reset` and `sdr-calman-reset` routes. |
 | CEC, mDNS and TV scan in `lg.pm` | `discover.py`: SSDP, then a sweep of the local subnet. Every candidate is confirmed with the helper's `probe`. |
 | Stale-session cleanup in `lg.pm` | `LG.clear_stale_calibration_mode`: CAL_END before a run if an earlier run died while holding calibration mode. |

@@ -5,5 +5,11 @@
   "picture_mode": "",
   "tv_ip": "",
   "patch_size": 10,
-  "meter": {"ccss": "", "args": ["-e"]}
+  "meter": {
+    "ccss": "",
+    "args": [
+      "-e"
+    ]
+  },
+  "reset_picture_mode": true
 }

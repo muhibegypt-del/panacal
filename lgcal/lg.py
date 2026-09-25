@@ -480,6 +480,48 @@ class LG:
             "get_command": payload.get("get_command") or "",
         })
 
+    def picture_reset(self, payload: dict) -> dict:
+        """lg.pm webui_lg_picture_reset: the picture mode back to factory."""
+        ready, error = self._ready(payload, "resetting picture settings")
+        if error:
+            return error
+        clients, ip, key = ready
+        picture_mode = payload.get("picture_mode") or clients.get("calibration_picture_mode") or ""
+        stale = self.clear_stale_calibration_mode()
+        if stale is not None and stale.get("status") != "ok":
+            return stale
+        reset_wb = bool(payload.get("require_white_balance_reset"))
+        result = self.run_helper({
+            "action": "picture_reset", "ip": ip, "client_key": key, "picture_mode": picture_mode,
+            "signal_mode": payload.get("signal_mode") or "", "require_white_balance_reset": reset_wb,
+            "reset_ddc_state": 1 if reset_wb else 0, "tv_input": "", "connect_timeout": 5,
+        })
+        self.record_calibration_mode_result(self.load_clients(), result, False, picture_mode)
+        if result.get("status") == "ok":
+            self.update_connect_metadata(result, clients.get("manual_ip") or ip)
+        return result
+
+    def sdr_calman_reset(self, payload: dict) -> dict:
+        """lg.pm webui_lg_sdr_calman_reset: identity BT.709 3D LUT, 1D LUT and
+        3x3 matrix, so nothing from an earlier (HDR) calibration remains."""
+        ready, error = self._ready(payload, "resetting SDR calibration state")
+        if error:
+            return error
+        clients, ip, key = ready
+        picture_mode = payload.get("picture_mode") or clients.get("calibration_picture_mode") or ""
+        stale = self.clear_stale_calibration_mode()
+        if stale is not None and stale.get("status") != "ok":
+            return stale
+        result = self.run_helper({
+            "action": "sdr_calman_reset", "ip": ip, "client_key": key, "picture_mode": picture_mode,
+            "ddc_layout": payload.get("ddc_layout") or "sdr26",
+            "helper_timeout": int(payload.get("helper_timeout") or 0), "connect_timeout": 5,
+        })
+        self.record_calibration_mode_result(self.load_clients(), result, False, picture_mode)
+        if result.get("status") == "ok":
+            self.update_connect_metadata(result, clients.get("manual_ip") or ip)
+        return result
+
     def clear_stale_calibration_mode(self) -> dict | None:
         """lg.pm lg_clear_stale_calibration_mode_for_reset: a run that died
         (power cut, closed window) leaves calibration mode held on the TV.

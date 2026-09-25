@@ -33,11 +33,16 @@ FAST = {
     "post_commit_white_resettle_ms": 0,
     "post_commit_low_shadow_settle_ms": 0,
     "post_commit_low_shadow_read_settle_ms": 0,
+    # Shortened in case the worker enables pattern insertion.
+    "patch_insert_patch_duration_ms": 0,
+    "patch_insert_time_duration_ms": 0,
+    "patch_insert_post_settle_ms": 0,
 }
 
 
 def simulate(session_dir: Path, settings: dict | None = None, *, black_level: str = "high",
-             gpu_range: str = "full", tv_mode: str = "expert2", stale_calibration: bool = False):
+             gpu_range: str = "full", tv_mode: str = "expert2", stale_calibration: bool = False,
+             reset: bool = True):
     """Returns (exit code, worker state, SimTV, SimMeter, console text)."""
     data_dir = Path(tempfile.mkdtemp(prefix="lgcal-sim-data-"))
     saved_data_dir = app.DATA_DIR
@@ -47,7 +52,7 @@ def simulate(session_dir: Path, settings: dict | None = None, *, black_level: st
         "model_name": SimTV.MODEL["model_name"], "calibration_mode": stale_calibration,
         "calibration_picture_mode": tv_mode if stale_calibration else ""}), encoding="utf-8")
     panel = Panel(black_level=black_level, gpu_range=gpu_range)
-    tv = SimTV(panel)
+    tv = SimTV(panel, leftover_calibration=reset)
     tv.picture_mode = tv_mode
     tv.calibration_mode = stale_calibration
     server = serve(tv)
@@ -61,7 +66,8 @@ def simulate(session_dir: Path, settings: dict | None = None, *, black_level: st
                 code = app.run(settings, pattern=pattern, meter=meter, helper=HERE / "stub_helper.pl",
                                perl=find_test_perl(), session_dir=session_dir,
                                extra_env={"PGEN_SIM_PORT": str(server.server_address[1])},
-                               config_overrides=FAST, delay_scale=0.0, find_tv_on_network=False)
+                               config_overrides=FAST, delay_scale=0.0, find_tv_on_network=False,
+                               reset_first=reset)
             except SystemExit as exc:
                 print(exc)
                 code = 2
