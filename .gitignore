@@ -1,5 +1,6 @@
 settings.json
 data/
 sessions/
+tools/
 __pycache__/
 *.pyc

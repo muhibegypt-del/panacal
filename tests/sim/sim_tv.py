@@ -28,12 +28,26 @@ def identity(index: float) -> float:
     return index * 32767 / 1023
 
 
-def sample_index(code8: int) -> float:
-    """8-bit full code -> fractional DPG sample index (via the legal ladder)."""
+def legal_code(code8: int, black_level: str = "high", gpu_range: str = "full") -> float:
+    """Drawn 8-bit code -> the 10-bit legal-domain code the TV samples with.
+
+    gpu_range "limited" is a GPU squeezing 0-255 into 16-235 on the wire.
+    black_level is the TV's HDMI Black Level: "high" expects full range and
+    converts it (64 + c*876/1023, as the worker documents); "low" expects
+    limited range, uses the code directly and clips below black and above
+    white, as LG does for RGB."""
+    wire = round(16 + code8 * 219 / 255) if gpu_range == "limited" else code8
+    if black_level == "low":
+        return float(min(940, max(64, wire << 2)))
     # 8 -> 10 bit as the worker's hardware-probed mapping assumes: a plain
     # shift, with full white landing on the last code.
-    wire = 1023 if code8 >= 255 else code8 << 2
-    legal = 64 + wire * 876 / 1023
+    wire10 = 1023 if wire >= 255 else wire << 2
+    return 64 + wire10 * 876 / 1023
+
+
+def sample_index(code8: int, black_level: str = "high", gpu_range: str = "full") -> float:
+    """Drawn 8-bit code -> fractional DPG sample index (via the legal ladder)."""
+    legal = legal_code(code8, black_level, gpu_range)
     codes, indexes = LADDER_CODES, LADDER_INDEXES
     if legal <= codes[0]:
         slope = (indexes[1] - indexes[0]) / (codes[1] - codes[0])
@@ -46,12 +60,15 @@ def sample_index(code8: int) -> float:
 
 
 class Panel:
-    def __init__(self, peak: float = 150.0, gains=(1.0, 0.95, 1.08), gammas=(2.32, 2.20, 2.40)):
+    def __init__(self, peak: float = 150.0, gains=(1.0, 0.95, 1.08), gammas=(2.32, 2.20, 2.40),
+                 black_level: str = "high", gpu_range: str = "full"):
         self.peak = peak
+        self.black_level = black_level
+        self.gpu_range = gpu_range
         self.gains = gains
         self.gammas = gammas
         self.dpg = [[identity(i) for i in range(1024)] for _ in range(3)]
-        self.reference = identity(sample_index(255))
+        self.reference = identity(sample_index(255))  # legal white 940
         self.lock = threading.Lock()
 
     def table_value(self, channel: int, index: float) -> float:
@@ -65,7 +82,8 @@ class Panel:
         with self.lock:
             light = []
             for channel, code in enumerate(rgb):
-                drive = max(0.0, self.table_value(channel, sample_index(code)) / self.reference)
+                index = sample_index(code, self.black_level, self.gpu_range)
+                drive = max(0.0, self.table_value(channel, index) / self.reference)
                 light.append(self.gains[channel] * drive ** self.gammas[channel])
         return tuple(self.peak * sum(M709[row][c] * light[c] for c in range(3)) for row in range(3))
 
@@ -88,7 +106,7 @@ class SimPattern:
 
 
 class SimMeter:
-    """Colorimeter reading the simulated panel, with ~0.3% repeatability."""
+    """Colorimeter reading the simulated panel: 0.3% luminance and 0.05% chroma repeatability."""
 
     def __init__(self, panel: Panel, pattern: SimPattern, seed: int = 7):
         self.panel = panel
@@ -99,7 +117,10 @@ class SimMeter:
     def read(self) -> tuple[float, float, float]:
         self.reads += 1
         X, Y, Z = self.panel.xyz(self.pattern.rgb)
-        noise = lambda v: v * (1 + self.random.gauss(0, 0.003)) + self.random.gauss(0, 0.0005)
+        # A colorimeter's repeatability is mostly common to all three
+        # channels (luminance); the chromaticity is much steadier.
+        common = 1 + self.random.gauss(0, 0.003)
+        noise = lambda v: v * common * (1 + self.random.gauss(0, 0.0005)) + self.random.gauss(0, 0.0003)
         return noise(X), noise(Y), noise(Z)
 
     def restart(self) -> None:

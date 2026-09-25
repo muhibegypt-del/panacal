@@ -69,9 +69,12 @@ class MeterService:
             count = int(low_light.get("requested_sample_count") or 1)
             if count not in (1, 2, 3, 5):
                 raise ValueError("Invalid requested_sample_count")
-            if self.synthetic_black and r == g == b == 0:
-                # meter_session.sh: absolute black on an emissive panel is
-                # reported as 0 instead of reading meter noise.
+            ire = payload.get("ire")
+            is_black = float(ire) <= 0 if isinstance(ire, (int, float)) else r == g == b == 0
+            if self.synthetic_black and r == g == b and is_black:
+                # meter_session.sh: the 0% step on an emissive panel is
+                # reported as 0 instead of reading meter noise (by IRE, so
+                # it also covers limited-range black, code 16).
                 record = {"X": 0, "Y": 0, "Z": 0, "x": 0, "y": 0, "luminance": 0.0, "cct": 0,
                           "sample_count": 0, "synthetic_black": True}
             else:

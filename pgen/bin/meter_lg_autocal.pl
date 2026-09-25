@@ -17423,7 +17423,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale {
    if($sdr26_rgb_limited && $sdr26_bits >= 10) {
     $idx=lg_autocal_sdr26_dpg_sample_index_for_limited_code($code,$sdr26_dpg_max_idx);
    } elsif($sdr26_rgb_limited) {
-    my $code10=int(64+($code+0)*(940-64)/(235-16)+0.5);
+    my $code10=int(64+($code+0-16)*(940-64)/(235-16)+0.5); # PC-PORT FIX: 8-bit legal black 16 is 10-bit 64 (was 64+code*4)
     $code10=940 if($code10 > 940);
     $idx=lg_autocal_sdr26_dpg_sample_index_for_limited_code($code10,$sdr26_dpg_max_idx);
    } else {

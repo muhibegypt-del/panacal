@@ -1,24 +1,9 @@
 {
-  "tv_ip": "192.168.1.60",
-  "picture_mode": "expert1",
-  "target_gamma": "2.2",
+  "_comment": "Optional. Copy to settings.json only to override something; everything is found automatically.",
+  "target_gamma": "bt1886",
   "target_delta_e": 0.5,
+  "picture_mode": "",
+  "tv_ip": "",
   "patch_size": 10,
-  "delay_ms": 1800,
-  "perl": "C:\\Strawberry\\perl\\bin\\perl.exe",
-  "argyll_bin": "C:\\Argyll\\Argyll_V3.3.0\\bin",
-  "meter": {
-    "spotread": "C:\\Argyll\\Argyll_V3.3.0\\bin\\spotread.exe",
-    "args": ["-e"],
-    "ccss": "",
-    "display_type": "oled",
-    "synthetic_black": true
-  },
-  "pattern": {
-    "screen": "",
-    "linearize_video_lut": true
-  },
-  "post_commit_polish": true,
-  "post_commit_verify": false,
-  "api_port": 8765
+  "meter": {"ccss": "", "args": ["-e"]}
 }

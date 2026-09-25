@@ -480,6 +480,25 @@ class LG:
             "get_command": payload.get("get_command") or "",
         })
 
+    def clear_stale_calibration_mode(self) -> dict | None:
+        """lg.pm lg_clear_stale_calibration_mode_for_reset: a run that died
+        (power cut, closed window) leaves calibration mode held on the TV.
+        Close it before the next run starts."""
+        clients = self.load_clients()
+        if not clients.get("calibration_mode"):
+            return None
+        result = self.calibration_mode({"enabled": False,
+                                        "picture_mode": clients.get("calibration_picture_mode") or ""})
+        if result.get("status") != "ok":
+            self.log("LG stale calibration mode could not be closed: " + (result.get("message") or ""))
+        return result
+
+    def current_picture_mode(self) -> str:
+        """The picture mode the TV is showing on this input right now."""
+        result = self.picture_settings({"keys": ["pictureMode"], "ignore_calibration_picture_mode": True})
+        settings = result.get("picture_settings") if isinstance(result.get("picture_settings"), dict) else {}
+        return str(settings.get("pictureMode") or "")
+
     # --- pairing (used by the launcher) ------------------------------------
     def probe(self, ip: str) -> dict:
         return self.run_helper({"action": "probe", "ip": ip, "connect_timeout": 5})

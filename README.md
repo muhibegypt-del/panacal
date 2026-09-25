@@ -1,81 +1,53 @@
 # LG OLED AutoCal on a PC
 
-This runs BigShoots' **PGenerator-Plus LG AutoCal** from a Windows PC, with no Raspberry Pi. It is the SDR 26-point greyscale calibration: white balance and gamma, written into the TV's 1D LUT (1D DPG). The PC draws the patches on the TV over HDMI and reads your meter with ArgyllCMS. The author's worker and LG helper do the calibration and talk to the TV.
+This runs BigShoots' **PGenerator-Plus LG AutoCal** from a Windows PC, with no Raspberry Pi. It is the SDR 26-point greyscale calibration: white balance and gamma, written into the TV's 1D LUT. The calibration and TV code is the author's, used with his permission (see `NOTICE.md`). `PATCHES.md` lists the few lines changed to run on Windows, plus one upstream bug fix.
 
-The calibration and TV code is the author's, used with his permission (see `NOTICE.md`). Only the parts that were Raspberry Pi-specific are replaced; `PATCHES.md` lists the few marked lines that changed.
+## Use it
 
-## What you need
+1. Connect the PC to the LG TV by HDMI. The TV must be on the same network as the PC.
+2. Plug in the meter and double-click **LG AutoCal.bat**.
+3. The first time only, type the PIN the TV shows.
+4. When asked, put the meter on the white patch in the middle of the TV. It starts by itself.
 
-- Windows 10 or 11, with the LG TV connected by HDMI and on the same network as the PC.
-- An LG webOS OLED that PGenerator-Plus supports.
-- Python 3.10 or newer (python.org, tick "Add to PATH").
-- Strawberry Perl (strawberryperl.com). It includes IO::Socket::SSL, which is needed to reach the TV over wss.
-- ArgyllCMS and a meter that Argyll's `spotread` supports (i1Display Pro, Spyder5 and others).
-- A spectral correction (`.ccss`) for WRGB OLED for your colorimeter. Without one, a colorimeter usually misreads OLED white by a few dE, and AutoCal will faithfully calibrate to that error.
+There is nothing to configure. On each run it:
 
-## One-time setup
-
-**Windows**
-1. Settings > Display: select **Extend these displays**, so the TV is a second screen. Use 60 Hz, turn **Use HDR** off, and turn Night light off.
-2. In the GPU control panel, set the TV output to **RGB, full range, 8 bpc**:
-   - NVIDIA: Output colour format RGB, Output dynamic range Full.
-   - AMD: Pixel Format RGB 4:4:4 PC Standard (Full RGB), Colour Depth 8 bpc.
-
-**LG TV**
-1. Set the HDMI input's **Black Level** to **High** (full range) or Auto.
-2. Select the picture mode you want to calibrate on that input.
-3. Turn off energy saving and the AI or dynamic picture features. Let the TV warm up for about 30 minutes.
-4. Enable **LG Connect Apps** (network control) in the TV's connection settings, and note the TV's IP address.
-
-**This folder**
-1. Run **Pair LG TV.bat** once. The first time, it creates `settings.json` and stops.
-2. Edit `settings.json`:
-
-| Setting | Meaning |
+| Step | What it does |
 |---|---|
-| `tv_ip` | The TV's IP address. |
-| `picture_mode` | Picture mode to calibrate: `expert1` (Expert Bright Room), `expert2` (Expert Dark Room), `filmMaker`, `cinema`, `game`, `normal`, `eco`, `sports`, `vivid` or `personalized`. |
-| `target_gamma` | `2.2`, `2.4`, `bt1886` or `srgb`. |
-| `target_delta_e` | dE ITP each level must reach. The dashboard default is 0.5. |
-| `patch_size` | Patch window as a percentage of screen area (10 is the default). |
-| `perl`, `argyll_bin`, `meter.spotread` | Paths to Perl and ArgyllCMS. |
-| `meter.args` | Extra `spotread` arguments; keep `-e`. |
-| `meter.ccss` | Full path to your OLED `.ccss` file. |
-| `meter.synthetic_black` | Report 0% as true black without reading it, as PGenerator does for OLED. |
-| `pattern.screen` | Only needed if more than one secondary display is connected, for example `\\.\DISPLAY2`. |
+| Tools | Finds Perl and ArgyllCMS. If either is missing, it downloads it into `tools\` (one time; no installer and no admin rights). |
+| TV | Finds the LG on the network, pairs once, and remembers it. |
+| Picture mode | Calibrates the mode the TV is in (Expert, Filmmaker, Cinema, ...). It first closes a calibration session left open by a crashed run. |
+| Display | Finds the TV's output by name. Switches Windows from Duplicate to Extend, and turns Windows HDR off on the TV. Clears the GPU video LUT. All of this is restored afterwards. |
+| Meter | Uses a WOLED `.ccss` correction if one is installed (ArgyllCMS, DisplayCAL or the `ccss` folder). It notices the meter on the patch by flashing the patch to black. |
+| Video range | Measures whether the TV expects full or limited range and draws patterns to match, so the TV's Black Level setting can stay as it is. If the PC sends limited range to a TV set to full, black is lifted; it stops before changing anything and says which setting to change. |
+| Calibrate | Runs the author's worker: 100% white, then 50%, 25%, 75% and 95% down to 2.3%, uploading a corrected 1D LUT until each level is within dE ITP 0.5. It then commits the LUT and closes calibration mode. |
+| Verify | Measures 100% down to 5% again on the finished calibration and prints dE ITP per level, using the author's formula. The numbers are a fresh measurement, not the solver's own. |
 
-3. Run **Pair LG TV.bat** again. The TV shows a PIN; type it in. The key is saved in `data\lg`, and later runs connect without a PIN.
+Ctrl+C stops safely. The worker finishes its current write and closes calibration mode.
 
-## Run
+Each run keeps everything in `sessions\<date_time>\`: the console output, every reading and TV request, the worker's log and state, and `verification.json`.
 
-1. Double-click **Run LG AutoCal.bat**. A black window opens on the TV with a white patch.
-2. Put the meter on the centre of the patch and press Enter. This current white becomes the luminance reference, as in the PGenerator dashboard.
-3. The author's worker then runs:
-   - It reads the TV's picture settings and opens LG calibration mode.
-   - It calibrates 100% white (chromaticity only), then 50%, 25%, 75% and 95% down to 2.3%. It measures each level and uploads a corrected 1D LUT until the level is within the dE target.
-   - It smooths the shadow end and commits the final LUT. Calibration mode is then closed.
+## Optional overrides
 
-A run typically takes 15–30 minutes, depending on the meter's speed in the shadows. Progress is shown in the console. At the end it prints each level's measured and target luminance and its dE ITP.
+Copy `settings.example.json` to `settings.json` only to change a default:
 
-Press **Ctrl+C** to stop. The worker finishes its current TV write and closes calibration mode before it exits.
-
-Each run writes a folder under `sessions\`:
-- `worker.log`: the worker's own log.
-- `autocal.log`: every patch, reading and TV request.
-- `worker_config.json` and `worker_state.json`: the full per-level history and the final 1D LUT.
+| Setting | Default | Meaning |
+|---|---|---|
+| `target_gamma` | `bt1886` | Also `2.2`, `2.4` or `srgb`. `bt1886` is the author's default; on an OLED's zero black it equals 2.4. |
+| `target_delta_e` | `0.5` | dE ITP each level must reach. |
+| `picture_mode` | the TV's current mode | Calibrate a different mode. |
+| `tv_ip` | found automatically | For networks where discovery is blocked. |
+| `patch_size` | `10` | Patch window as a percentage of screen area. |
+| `meter.ccss` | found automatically | A specific correction file. |
 
 ## Scope
 
-- SDR only. HDR10 and Dolby Vision AutoCal need HDR signalling and 10-bit patterns, which a Windows desktop window cannot produce. Use a Pi for those.
+- SDR only. HDR10 and Dolby Vision need HDR signalling and 10-bit patterns, which a Windows desktop window cannot produce.
 - The 3D LUT and CMS workflows are not included.
-- Patches are drawn as 8-bit full-range RGB. This is the worker's 8-bit full-range path, which PGenerator-Plus also supports on the Pi. With 8 bpc output, Windows sends the drawn codes to the TV unchanged; `dispwin` resets the GPU video LUT to linear for the run and restores it afterwards.
-- The Pi checks TV power over HDMI-CEC. The PC cannot, so the first TV command is the check.
+- Patches are 8-bit RGB. This is the worker's 8-bit path.
 
 ## Offline tests
 
-Run **Run Offline Tests.bat** to test without a TV or meter:
-- **Transport**: the real LG helper connects and pairs by PIN over TLS on port 3001 with a fake webOS TV.
-- **Simulated run**: the real worker completes a full calibration of a simulated LG OLED through the PC server. The simulated panel has per-channel gamma and white-balance errors, and the simulated meter has 0.3% noise.
-- **Units**: the step list, the meter and pattern routes, and the LG route bookkeeping.
-
-`python -m tests.sim.run_sim` runs the simulation on its own and keeps its session folder.
+**Run Offline Tests.bat** checks the whole thing without a TV or meter:
+- The real LG helper pairs by PIN over TLS with a fake webOS TV.
+- The display script runs against a simulated duplicated display with HDR on.
+- The real worker calibrates a simulated LG OLED end to end, and the independent verification checks the result. It covers a TV on full range, a TV on Black Level Low, the lifted-black case, and a stale calibration session.

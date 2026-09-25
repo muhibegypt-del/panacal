@@ -11,13 +11,20 @@ import unittest
 from pathlib import Path
 
 from lgcal import app
+from lgcal.display import DisplaySetup, powershell
 from lgcal.lg import LG, helper_timeout
 from lgcal.meter import xyz_record
 from lgcal.patterns import to_8bit, window_area
 from lgcal.server import Api, MeterService
+from lgcal.setup import ccss_score
+from lgcal.signal import delta_e_itp
 from lgcal.steps import build_config, build_steps, code_for_slot
 
-PERL = shutil.which("perl")
+HERE = Path(__file__).resolve().parent
+
+from tests.sim.run_sim import find_test_perl
+
+PERL = find_test_perl()
 
 
 def perl_has(module: str) -> bool:
@@ -53,11 +60,42 @@ class StepsTests(unittest.TestCase):
         self.assertTrue(config["lg_autocal_sdr_1d_dpg_mode"])
         self.assertEqual(config["target_luminance"], 142.0)
 
+    def test_limited_range_uses_legal_codes(self):
+        self.assertEqual((code_for_slot(0, True), code_for_slot(50, True), code_for_slot(100, True)),
+                         (16, 126, 235))
+        config = build_config({}, 140.0, limited=True, picture_mode="expert2")
+        self.assertEqual((config["signal_range"], config["picture_mode"]), ("1", "expert2"))
+        steps = config["steps"]
+        self.assertEqual((steps[0]["r"], steps[1]["r"]), (235, 16))
+        self.assertAlmostEqual(steps[1]["stimulus"], 0)
+
     def test_bad_settings_are_rejected(self):
         with self.assertRaises(ValueError):
             build_config({"target_gamma": "2.6"})
         with self.assertRaises(ValueError):
             build_config({"picture_mode": "ISF Bright"})
+
+
+class MetricTests(unittest.TestCase):
+    @unittest.skipUnless(PERL, "needs perl")
+    def test_delta_e_itp_matches_the_worker(self):
+        for a, b in (((95.047, 100, 108.883), (96, 100, 107)), ((0.03, 0.031, 0.035), (0.029, 0.03, 0.036))):
+            perl = subprocess.run([PERL, "-I", str(HERE.parent / "pgen" / "share" / "PGenerator"),
+                                   "-MPGMath=delta_e_itp_xyz", "-e", "print delta_e_itp_xyz(@ARGV)",
+                                   *map(str, a + b)], capture_output=True, text=True).stdout
+            self.assertAlmostEqual(delta_e_itp(a, b), float(perl), places=8)
+
+    def test_only_woled_corrections_are_picked(self):
+        directory = Path(tempfile.mkdtemp())
+        try:
+            (directory / "WOLED_LG_C1.ccss").write_text('DISPLAY "LG OLED"\n')
+            (directory / "OLEDFamily_20Jul12.ccss").write_text('TECHNOLOGY "AMOLED"\n')
+            (directory / "x.ccss").write_text('DISPLAY "LG OLED C2"\nTECHNOLOGY "WRGB OLED"\n')
+            self.assertEqual(ccss_score(directory / "WOLED_LG_C1.ccss"), 3)
+            self.assertEqual(ccss_score(directory / "OLEDFamily_20Jul12.ccss"), 0)
+            self.assertEqual(ccss_score(directory / "x.ccss"), 3)
+        finally:
+            shutil.rmtree(directory)
 
 
 class Pattern:
@@ -114,7 +152,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.pattern.shown[-1], (128, 128, 128, 0.10))
 
     def test_black_is_synthetic_on_oled(self):
-        self.api.handle("POST", "/api/meter/read", {"patch_r": 0, "patch_g": 0, "patch_b": 0,
+        # By IRE, as meter_session.sh does, so limited black (code 16) counts.
+        self.api.handle("POST", "/api/meter/read", {"patch_r": 16, "patch_g": 16, "patch_b": 16, "ire": 0,
                                                     "delay_ms": 0, "request_id": "k"})
         reading = self.wait()["readings"][0]
         self.assertEqual((reading["Y"], self.meter.reads), (0, 0))
@@ -170,6 +209,16 @@ class LGRouteTests(unittest.TestCase):
         data = self.requests[-1]["dpg_data"]
         self.assertEqual((data[0], data[1]), (0, 65535))
 
+    def test_stale_calibration_mode_is_closed(self):
+        self.lg.save_clients({"ip": "192.0.2.1", "client_key": "k", "calibration_mode": True,
+                              "calibration_picture_mode": "expert2"})
+        self.lg.clear_stale_calibration_mode()
+        self.assertEqual((self.requests[-1]["action"], self.requests[-1]["enable"]), ("calibration_mode", 0))
+        self.assertFalse(self.lg.load_clients()["calibration_mode"])
+        self.requests.clear()
+        self.assertIsNone(self.lg.clear_stale_calibration_mode())
+        self.assertEqual(self.requests, [])
+
     def test_timeouts_match_lg_pm(self):
         self.assertEqual(helper_timeout({"action": "picture_set", "settings": {"whiteBalanceRed": []}}), 150)
         self.assertEqual(helper_timeout({"action": "1d_dpg_upload"}), 80)
@@ -193,38 +242,92 @@ class TransportTests(unittest.TestCase):
         self.tv.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def test_pin_pairing_then_stored_key(self):
+    def test_find_pair_then_stored_key(self):
         from tests.fake_webos import KEY, PIN
-        settings = {"tv_ip": "127.0.0.1", "perl": PERL}
-        self.assertEqual(app.pair(settings, pin_input=lambda _p: PIN), 0)
+        lg = LG(PERL, app.HELPER, app.DATA_DIR, lambda _m: None, app.perl_env(None, None))
+        settings = {"tv_ip": "127.0.0.1"}
+        self.assertEqual(app.find_tv(lg, settings, pin_input=lambda _p: PIN), "127.0.0.1")
         self.assertEqual(json.loads((app.DATA_DIR / "clients.json").read_text())["client_key"], KEY)
         self.assertIn("ssap://pairing/setPin", self.tv.log)
-        self.assertEqual(app.pair(settings, pin_input=lambda _p: self.fail("asked for a PIN again")), 0)
+        app.find_tv(lg, settings, pin_input=lambda _p: self.fail("asked for a PIN again"))
+
+
+def find_powershell() -> str:
+    candidate = powershell()
+    return candidate if shutil.which(candidate) or Path(candidate).is_file() else ""
+
+
+@unittest.skipUnless(find_powershell(), "needs PowerShell")
+class DisplayScriptTests(unittest.TestCase):
+    """display_setup.ps1 against a fake DisplayTool in the Panasonic-run state:
+    TV duplicated with the monitor and HDR on."""
+
+    def test_extend_find_lg_hdr_off_then_restore(self):
+        import os
+        work = Path(tempfile.mkdtemp())
+        try:
+            shutil.copy(HERE.parent / "lgcal" / "display_setup.ps1", work)
+            shutil.copy(HERE / "fake_display" / "DisplayTool.cs", work)
+            calls = work / "calls.log"
+            os.environ["FAKE_DISPLAY_LOG"] = str(calls)
+            setup = DisplaySetup(work, lambda _m: None, work)
+            state = setup.prepare()
+            self.assertEqual((state["device"], state["name"]), ("\\\\.\\DISPLAY2", "LG TV SSCR2"))
+            self.assertTrue(state["topology_changed"] and state["hdr_changed"])
+            setup.restore()
+            self.assertEqual(calls.read_text().split("\n")[:4],
+                             ["topology 4", "hdr 77 2 False", "hdr 77 2 True", "topology 2"])
+        finally:
+            os.environ.pop("FAKE_DISPLAY_LOG", None)
+            shutil.rmtree(work, ignore_errors=True)
 
 
 @unittest.skipUnless(PERL, "needs perl")
 class SimulationTests(unittest.TestCase):
     """The complete worker run against a simulated LG OLED and meter."""
 
-    def test_full_sdr_greyscale_calibration(self):
+    def simulate(self, **kwargs):
         from tests.sim.run_sim import simulate
         directory = Path(tempfile.mkdtemp())
-        saved = app.DATA_DIR
-        try:
-            code, state, tv, meter = simulate(directory)
-        finally:
-            app.DATA_DIR = saved
-        self.assertEqual((code, state["status"]), (0, "complete"), state.get("message"))
-        # The worker targets dE ITP 0.5 against a meter with 0.3% noise;
-        # it may stop a level at its iteration budget just above that.
-        self.assertLess(state["sdr_1d_dpg_final_de"], 1.0)
-        best = sorted(min(float(e["de"]) for e in entries)
-                      for entries in state["sdr_1d_dpg_anchor_history"].values())
-        self.assertLess(best[len(best) // 2], 0.5, "median level must reach the target")
+        self.addCleanup(shutil.rmtree, directory, True)
+        code, state, tv, meter, console = simulate(directory, **kwargs)
+        verification = directory / "verification.json"
+        return code, state, tv, console, json.loads(verification.read_text()) if verification.exists() else {}
+
+    def assert_calibrated(self, code, state, tv, console, verification):
+        self.assertEqual((code, state.get("status")), (0, "complete"), console[-2000:])
         self.assertTrue(state["sdr_1d_dpg_single_socket_commit"])
         self.assertFalse(tv.calibration_mode, "calibration mode must be closed at the end")
-        self.assertGreater(tv.uploads, 20)
-        shutil.rmtree(directory, ignore_errors=True)
+        # Independent measurement of the committed calibration (meter noise
+        # 0.3% luminance): D65 and the target curve at every level.
+        self.assertLess(verification["average_de"], 0.6)
+        self.assertLess(verification["max_de"], 1.2)
+        for row in verification["rows"]:
+            self.assertAlmostEqual(row["x"], 0.3127, delta=0.0015)
+            self.assertAlmostEqual(row["y"], 0.3290, delta=0.0015)
+
+    def test_full_range_tv(self):
+        result = self.simulate(tv_mode="expert2")
+        self.assert_calibrated(*result)
+        self.assertIn("full-range", result[3])
+        self.assertIn("Expert (Dark Room)", result[3])
+
+    def test_tv_on_black_level_low_gets_limited_patterns(self):
+        result = self.simulate(black_level="low")
+        self.assert_calibrated(*result)
+        self.assertIn("limited-range", result[3])
+
+    def test_lifted_black_stops_before_touching_the_tv(self):
+        code, state, tv, console, _ = self.simulate(gpu_range="limited")
+        self.assertEqual(code, 2)
+        self.assertIn("Black is lifted", console)
+        self.assertEqual(tv.uploads, 0)
+
+    def test_stale_session_is_closed_first(self):
+        code, state, tv, console, verification = self.simulate(stale_calibration=True, tv_mode="filmMaker")
+        self.assertEqual(tv.requests[0], "calibration_mode")
+        self.assertIn("Closed a calibration session", console)
+        self.assertEqual(state["picture_mode"], "filmMaker")
 
 
 if __name__ == "__main__":
