@@ -31,8 +31,8 @@ eval { require '/usr/share/PGenerator/PGAutoCalRun.pm'; $PGAC_LOADED = 1; 1 };
 my $config_file = shift || "/tmp/meter_lg_autocal_config.json";
 my $state_file = shift || "/tmp/meter_lg_autocal.json";
 my $stop_file = shift || "/tmp/meter_lg_autocal.stop";
-my $api_host = "127.0.0.1";
-my $api_port = 80;
+my $api_host = $ENV{"PGEN_API_HOST"} || "127.0.0.1"; # PC-PORT: stand-in API address
+my $api_port = $ENV{"PGEN_API_PORT"} || 80; # PC-PORT
 my $json = JSON::PP->new->canonical(1);
 my $cancelled = 0;
 our $LG_AUTOCAL_HEADROOM_TARGET_LUMINANCE = 0;
@@ -330,9 +330,12 @@ sub lg_helper_json {
  $request={} if(ref($request) ne "HASH");
  $timeout ||= 170;
  my $helper="/usr/sbin/pgenerator-lg";
- return { status=>"error", message=>"LG WebOS helper is not installed" } if(!-x $helper);
+ my $pc_helper=$ENV{"PGEN_LG_HELPER"}||""; # PC-PORT: no timeout/env/sh on Windows
+ return { status=>"error", message=>"LG WebOS helper is not installed" } if($pc_helper eq "" && !-x $helper);
  my $payload=MIME::Base64::encode_base64($json->encode($request),"");
  my $cmd="timeout ".int($timeout)."s env PGEN_LG_REQUEST_B64=".shell_quote($payload)." ".shell_quote($helper)." 2>&1";
+ local $ENV{"PGEN_LG_REQUEST_B64"}=$payload if($pc_helper ne "");
+ $cmd=qq{"$^X" "$pc_helper"} if($pc_helper ne "");
  my $raw=`$cmd`;
  my $exit_status=$? >> 8;
  my $result=decode_json_safe($raw,{});
@@ -347,7 +350,7 @@ sub lg_helper_json {
 }
 
 sub lg_clients {
- return decode_json_safe(read_file("/var/lib/PGenerator/lg/clients.json"),{});
+ return decode_json_safe(read_file(($ENV{"PGEN_LG_DATA_DIR"}||"/var/lib/PGenerator/lg")."/clients.json"),{}); # PC-PORT
 }
 
 sub lg_helper_picture_set {
@@ -21699,7 +21702,7 @@ sub autocal_ddc_reset_diag_log (@) {
   }
   my $body=eval { JSON::PP->new->canonical(1)->utf8(1)->encode($data); } || "<encode-failed>";
   my $line="[$stamp] autocal:ddc-reset $body\n";
-  my $path="/var/lib/PGenerator/lg/last-write.log";
+  my $path=($ENV{"PGEN_LG_DATA_DIR"}||"/var/lib/PGenerator/lg")."/last-write.log"; # PC-PORT
   if(-f $path && (stat($path))[7] > 131072) {
    unlink($path);
   }

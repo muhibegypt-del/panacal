@@ -10,6 +10,7 @@ use File::Path qw(make_path);
 use MIME::Base64 qw(encode_base64 decode_base64);
 use Time::HiRes qw(time);
 use POSIX ();
+use Scalar::Util (); # PC-PORT
 
 BEGIN {
  my $directory=__FILE__;
@@ -457,7 +458,7 @@ sub socket_read_exact (@) {
  while(length($buf) < $wanted) {
   my $remaining=$deadline-time();
   return undef if($remaining <= 0);
-  my @ready=$sel->can_read($remaining);
+  my @ready=(Scalar::Util::blessed($sock) && $sock->can("pending") && $sock->pending) ? ($sock) : $sel->can_read($remaining); # PC-PORT: buffered TLS bytes
   return undef if(!@ready);
   my $chunk="";
   my $read=sysread($sock,$chunk,$wanted-length($buf));
@@ -476,7 +477,7 @@ sub socket_read_headers (@) {
  while(index($buf,"\r\n\r\n") < 0) {
   my $remaining=$deadline-time();
   return undef if($remaining <= 0);
-  my @ready=$sel->can_read($remaining);
+  my @ready=(Scalar::Util::blessed($sock) && $sock->can("pending") && $sock->pending) ? ($sock) : $sel->can_read($remaining); # PC-PORT: buffered TLS bytes
   return undef if(!@ready);
   my $chunk="";
   my $read=sysread($sock,$chunk,1024);
@@ -658,7 +659,26 @@ sub websocket_connect_candidate (@) {
  my ($host,$scheme,$port,$timeout)=@_;
  my $sock;
  my $session;
- if($scheme eq "wss") {
+ if($scheme eq "wss" && ($^O eq "MSWin32" || $ENV{"PGEN_LG_NATIVE_TLS"})) {
+  # PC-PORT: in-process TLS replaces the socat child. The TV presents a
+  # self-signed certificate, matching socat's verify=0.
+  $sock=IO::Socket::SSL->new(
+   PeerHost => $host,
+   PeerPort => $port,
+   SSL_verify_mode => IO::Socket::SSL::SSL_VERIFY_NONE(),
+   SSL_hostname => "",
+   Timeout => &connect_timeout_for($timeout),
+  );
+  return undef if(!$sock);
+  $session={
+   socket => $sock,
+   select => IO::Select->new($sock),
+   host => $host,
+   scheme => $scheme,
+   port => $port,
+   seq => 1,
+  };
+ } elsif($scheme eq "wss") {
   my ($reader,$writer);
   # socat's -T is an INACTIVITY timeout, not a connect timeout; on its own it
   # does nothing for a TV that never answers the SYN. connect-timeout is the
@@ -2508,7 +2528,7 @@ foreach my $attempt (@panel_payloads) {
 ###############################################
 #       Picture-write Diagnostic Logging      #
 ###############################################
-$DIAG_LOG_PATH="/var/lib/PGenerator/lg/last-write.log";
+$DIAG_LOG_PATH=($ENV{"PGEN_LG_DATA_DIR"}||"/var/lib/PGenerator/lg")."/last-write.log"; # PC-PORT
 $DIAG_LOG_MAX_BYTES=131072;
 # dolby_hdr_[a-z_]+ is a general catch-all so any Dolby Vision preset name
 # lg_picture_mode_for_calibration derives (including ones not spelled out
@@ -2696,7 +2716,7 @@ sub lg_settings_error_is_unsupported_key (@) {
 ###############################################
 #        LG Calibration / 1D LUT DDC          #
 ###############################################
-$LG_DDC_DIR="/var/lib/PGenerator/lg/ddc";
+$LG_DDC_DIR=($ENV{"PGEN_LG_DATA_DIR"}||"/var/lib/PGenerator/lg")."/ddc"; # PC-PORT
 $LG_DDC_1D_MIN_STEP_UNITS=64;
 $LG_DDC_1D_STEP_RATIO=0.018;
 $LG_DDC_1D_BLACK_SAMPLE=0;
@@ -4049,7 +4069,7 @@ sub lg_3d_lut_upload_workflow (@) {
 
 sub lg_3d_lut_reset_workflow (@) {
  my ($ip,$client_key,$connect_timeout,$picture_mode,$upload_command,$get_command,$keep_calibration_mode,$calibration_mode_active,$signal_mode)=@_;
- my $tmp="/tmp/pgenerator_lg_unity_3d_lut_$$.bin";
+ my $tmp=($ENV{"PGEN_LG_TMP_DIR"}||"/tmp")."/pgenerator_lg_unity_3d_lut_$$.bin"; # PC-PORT
  my $unity=&lg_unity_3d_lut(33);
  &file_write_text($tmp,pack("v*",@{$unity}));
  my $result=&lg_3d_lut_upload_workflow($ip,$client_key,$connect_timeout,$picture_mode,$tmp,$upload_command,$get_command,$keep_calibration_mode,$calibration_mode_active,$signal_mode);
