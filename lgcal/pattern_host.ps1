@@ -33,14 +33,14 @@ if ($Screen) {
         throw "More than one secondary display is active; set pattern.screen in settings.json. Windows sees: $inventory"
     }
 }
-$screen = $target[0]
+$tvScreen = $target[0]
 $script:state = [ordered]@{ sequence = -1; r = 0; g = 0; b = 0; windowArea = 0.10 }
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'LG AutoCal Pattern'
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
 $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-$form.Bounds = $screen.Bounds
+$form.Bounds = $tvScreen.Bounds
 $form.BackColor = [System.Drawing.Color]::Black
 $form.TopMost = $true
 $form.ShowInTaskbar = $false
@@ -77,7 +77,7 @@ function Write-Status([int]$sequence) {
     $status = [ordered]@{
         ready = $true
         sequence = $sequence
-        device = $screen.DeviceName
+        device = $tvScreen.DeviceName
         width = $bounds.Width
         height = $bounds.Height
         r = $script:state.r
@@ -119,7 +119,7 @@ $timer.Add_Tick({
 })
 
 $form.Add_Shown({
-    $form.Bounds = $screen.Bounds
+    $form.Bounds = $tvScreen.Bounds
     $form.Activate()
     Write-Status -1
     $timer.Start()

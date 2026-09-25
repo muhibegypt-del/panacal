@@ -398,5 +398,20 @@ class Cleanup(unittest.TestCase):
         self.assertTrue(process.killed)
 
 
+class PowerShellScripts(unittest.TestCase):
+    def test_no_local_variable_reuses_a_parameter_name(self):
+        """PowerShell names ignore case: `$screen = ...` writes the typed
+        `[string]$Screen` parameter and turns the object into text."""
+        import re
+        root = Path(__file__).resolve().parent.parent
+        for script in root.rglob("*.ps1"):
+            text = script.read_text(encoding="utf-8-sig")
+            block = re.search(r"param\s*\((.*?)\)\s*\n", text, re.S)
+            params = {name.lower() for name in re.findall(r"\$(\w+)", block.group(1))} if block else set()
+            for number, line in enumerate(text.splitlines(), 1):
+                for name in re.findall(r"^\s*\$(\w+)\s*=", line):
+                    self.assertNotIn(name.lower(), params, f"{script.name}:{number} assigns to parameter ${name}")
+
+
 if __name__ == "__main__":
     unittest.main()
