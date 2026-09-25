@@ -100,11 +100,26 @@ class LG:
         return self.data_dir / "clients.json"
 
     def load_clients(self) -> dict:
+        """The paired-TV store; {} when nothing is paired yet. A damaged file
+        is kept as clients.json.damaged and logged, so pairing again is
+        explained rather than mysterious."""
+        if not self.clients_file.exists():
+            return {}
         try:
             data = json.loads(self.clients_file.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
-            return {}
+            if isinstance(data, dict):
+                return data
+            problem = "not a JSON object"
+        except (OSError, ValueError) as exc:
+            problem = str(exc)
+        damaged = self.clients_file.with_suffix(".json.damaged")
+        try:
+            os.replace(self.clients_file, damaged)
+            kept = f"kept as {damaged.name}"
+        except OSError as exc:
+            kept = f"could not be moved aside ({exc})"
+        self.log(f"LG clients.json was unreadable ({problem}); {kept}; the TV will pair again")
+        return {}
 
     def save_clients(self, clients: dict) -> bool:
         temporary = self.clients_file.with_suffix(".json.tmp")
@@ -112,7 +127,9 @@ class LG:
             temporary.write_text(json.dumps(clients), encoding="utf-8")
             os.replace(temporary, self.clients_file)
             return True
-        except OSError:
+        except OSError as exc:
+            self.log(f"LG could not save clients.json: {exc}")
+            temporary.unlink(missing_ok=True)
             return False
 
     @staticmethod
@@ -286,6 +303,8 @@ class LG:
             except ValueError:
                 result = None
             elapsed = time.monotonic() - started
+            if stderr.strip():
+                self.log(f"LG {action} stderr: {stderr.strip()[-800:]}")
             if isinstance(result, dict) and result.get("status"):
                 self.log(f"LG {action}: {result.get('status')} in {elapsed:.1f}s"
                          + (f" ({result.get('message')})" if result.get("message") else ""))

@@ -102,11 +102,15 @@ class Meter:
             target=self._reader, args=(self.process.stdout, self.lines), daemon=True)
         self.reader_thread.start()
         deadline = time.monotonic() + self.startup_timeout
-        while True:
-            if self.READY_PROMPT in self._next_output(deadline, "startup"):
-                self.ready = True
-                self.log("METER ready")
-                return
+        try:
+            while True:
+                if self.READY_PROMPT in self._next_output(deadline, "startup"):
+                    self.ready = True
+                    self.log("METER ready")
+                    return
+        except (TimeoutError, RuntimeError) as exc:
+            raise RuntimeError(f"The meter did not start ({exc}). Check it is plugged in and not open in "
+                               "another program (DisplayCAL, HCFR, Calman).") from None
 
     def restart(self) -> None:
         self.close()

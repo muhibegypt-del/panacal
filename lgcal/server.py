@@ -16,8 +16,26 @@ from .meter import read_with_recovery, xyz_record
 from .patterns import to_8bit, window_area
 
 
+def is_synthetic_black(payload: dict, enabled: bool) -> bool:
+    """meter_session.sh: the 0% step on an emissive panel is reported as 0
+    instead of reading meter noise. Decided by IRE, so it also covers
+    limited-range black (code 16)."""
+    if not enabled:
+        return False
+    r, g, b = (int(payload.get(key) or 0) for key in ("patch_r", "patch_g", "patch_b"))
+    if not r == g == b:
+        return False
+    ire = payload.get("ire")
+    return float(ire) <= 0 if isinstance(ire, (int, float)) and not isinstance(ire, bool) else r == 0
+
+
 class MeterService:
-    """Mirrors meter_session.sh: draw the patch, wait delay_ms, read."""
+    """Mirrors meter_session.sh: draw the patch, wait delay_ms, read.
+
+    Reads run one at a time. If the worker asks again while a read is still
+    running (after its own timeout), the new request waits its turn, and a
+    finished read is only published if it is still the latest request, so a
+    stale result can never answer a newer one."""
 
     def __init__(self, pattern, meter, log, synthetic_black: bool = True):
         self.pattern = pattern
@@ -26,8 +44,9 @@ class MeterService:
         self.synthetic_black = synthetic_black
         self.pattern_lock = threading.Lock()
         self.state_lock = threading.Lock()
+        self.read_lock = threading.Lock()
         self.state: dict = {"status": "idle"}
-        self.busy = False
+        self.latest = None
         self.delay_scale = 1.0
 
     def show(self, r: int, g: int, b: int, input_max: int, size: int) -> None:
@@ -48,16 +67,26 @@ class MeterService:
         return {"status": "ok", "pattern": "patch"}
 
     def start_read(self, payload: dict) -> dict:
+        request_id = str(payload.get("request_id") or "")
+        token = object()
         with self.state_lock:
-            if self.busy:
-                return {"status": "error", "message": "A meter reading is already in progress"}
-            self.busy = True
-            self.state = {"status": "measuring", "request_id": payload.get("request_id") or ""}
-        threading.Thread(target=self._read, args=(payload,), daemon=True).start()
-        return {"status": "measuring", "request_id": payload.get("request_id") or ""}
+            self.latest = token
+            self.state = {"status": "measuring", "request_id": request_id}
+        threading.Thread(target=self._read, args=(payload, token), daemon=True).start()
+        return {"status": "measuring", "request_id": request_id}
 
-    def _read(self, payload: dict) -> None:
-        request_id = payload.get("request_id") or ""
+    def _read(self, payload: dict, token) -> None:
+        with self.read_lock:
+            with self.state_lock:
+                if self.latest is not token:
+                    return          # superseded before it started
+            state = self._measure(payload)
+            with self.state_lock:
+                if self.latest is token:
+                    self.state = state
+
+    def _measure(self, payload: dict) -> dict:
+        request_id = str(payload.get("request_id") or "")
         try:
             r, g, b = (int(payload.get(key) or 0) for key in ("patch_r", "patch_g", "patch_b"))
             input_max = int(payload.get("input_max") or 255)
@@ -69,12 +98,7 @@ class MeterService:
             count = int(low_light.get("requested_sample_count") or 1)
             if count not in (1, 2, 3, 5):
                 raise ValueError("Invalid requested_sample_count")
-            ire = payload.get("ire")
-            is_black = float(ire) <= 0 if isinstance(ire, (int, float)) else r == g == b == 0
-            if self.synthetic_black and r == g == b and is_black:
-                # meter_session.sh: the 0% step on an emissive panel is
-                # reported as 0 instead of reading meter noise (by IRE, so
-                # it also covers limited-range black, code 16).
+            if is_synthetic_black(payload, self.synthetic_black):
                 record = {"X": 0, "Y": 0, "Z": 0, "x": 0, "y": 0, "luminance": 0.0, "cct": 0,
                           "sample_count": 0, "synthetic_black": True}
             else:
@@ -89,13 +113,10 @@ class MeterService:
             })
             self.log(f"READ {record['name'] or '?':>6} code {r},{g},{b}/{input_max}  "
                      f"Y={record['Y']:.4f} x={record['x']:.4f} y={record['y']:.4f}")
-            state = {"status": "ok", "request_id": request_id, "readings": [record], "count": 1}
-        except Exception as exc:  # reported to the worker, which decides
-            self.log(f"READ failed: {exc}")
-            state = {"status": "error", "request_id": request_id, "message": str(exc)}
-        with self.state_lock:
-            self.state = state
-            self.busy = False
+            return {"status": "ok", "request_id": request_id, "readings": [record], "count": 1}
+        except Exception as exc:  # reported to the worker (it retries or stops) and logged
+            self.log(f"READ failed: {exc!r}")
+            return {"status": "error", "request_id": request_id, "message": f"Meter read failed: {exc}"}
 
     def result(self) -> dict:
         with self.state_lock:
@@ -137,19 +158,21 @@ def make_server(api: Api, port: int) -> ThreadingHTTPServer:
         protocol_version = "HTTP/1.0"
 
         def _serve(self, method: str) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length else b""
             try:
+                length = max(0, int(self.headers.get("Content-Length") or 0))
+                raw = self.rfile.read(length) if length else b""
                 payload = json.loads(raw) if raw.strip() else {}
                 if not isinstance(payload, dict):
-                    payload = {}
-            except ValueError:
-                payload = {}
-            try:
-                result = api.handle(method, self.path, payload)
-            except Exception as exc:
-                api.log(f"API {method} {self.path} failed: {exc!r}")
-                result = {"status": "error", "message": str(exc)}
+                    raise ValueError("request body must be a JSON object")
+            except ValueError as exc:
+                api.log(f"API {method} {self.path}: bad request ({exc})")
+                result = {"status": "error", "message": f"Bad request: {exc}"}
+            else:
+                try:
+                    result = api.handle(method, self.path, payload)
+                except Exception as exc:  # answered to the worker and logged
+                    api.log(f"API {method} {self.path} failed: {exc!r}")
+                    result = {"status": "error", "message": str(exc)}
             body = json.dumps(result).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

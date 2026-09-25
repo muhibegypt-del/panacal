@@ -24,8 +24,10 @@ ARGYLL_PAGE = "https://www.argyllcms.com/downloadwin.html"
 
 
 def load_cache() -> dict:
+    """Remembered tool paths. Missing or damaged just means "search again"."""
     try:
-        return json.loads(CACHE.read_text(encoding="utf-8"))
+        data = json.loads(CACHE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -35,38 +37,74 @@ def save_cache(data: dict) -> None:
     CACHE.write_text(json.dumps(data, indent=1), encoding="utf-8")
 
 
+def progress_step(done: int, total: int) -> int:
+    """Progress bucket: tens of percent with a known size, else every 10 MB."""
+    return done * 10 // total if total > 0 else done // (10 << 20)
+
+
 def download(url: str, target: Path, say, sha256: str = "") -> None:
+    """Download to target.part, check the SHA-256 when given, then rename.
+    A failed or interrupted download leaves nothing behind."""
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(target.suffix + ".part")
     digest = hashlib.sha256()
-    with urllib.request.urlopen(url, timeout=60) as response, partial.open("wb") as out:
-        total = int(response.headers.get("Content-Length") or 0)
-        done, shown = 0, -1
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-            digest.update(chunk)
-            done += len(chunk)
-            percent = done * 100 // total if total else -1
-            if percent >= shown + 10:
-                shown = percent
-                say(f"  {target.name}: {percent}%" if total else f"  {target.name}: {done >> 20} MB")
-    if sha256 and digest.hexdigest().lower() != sha256.lower():
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response, partial.open("wb") as out:
+            total = int(response.headers.get("Content-Length") or 0)
+            done, shown = 0, 0
+            while chunk := response.read(1 << 20):
+                out.write(chunk)
+                digest.update(chunk)
+                done += len(chunk)
+                if progress_step(done, total) > shown:
+                    shown = progress_step(done, total)
+                    say(f"  {target.name}: {done * 100 // total}%" if total else
+                        f"  {target.name}: {done >> 20} MB")
+        if sha256 and digest.hexdigest().lower() != sha256.lower():
+            raise SystemExit(f"The download of {target.name} was damaged (checksum mismatch). Run again.")
+        os.replace(partial, target)
+    except OSError as exc:
+        raise SystemExit(f"Could not download {target.name} ({exc}). Check the internet connection "
+                         "and run again.") from None
+    finally:
         partial.unlink(missing_ok=True)
-        raise SystemExit(f"Download of {url} failed its checksum; run again.")
-    os.replace(partial, target)
+
+
+def extract(archive: Path, target: Path, say) -> None:
+    """Unzip, removing a half-written folder if it fails."""
+    say("  unpacking ...")
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(target)
+    except (OSError, zipfile.BadZipFile) as exc:
+        shutil.rmtree(target, ignore_errors=True)
+        raise SystemExit(f"Could not unpack {archive.name} ({exc}). Run again.") from None
+    finally:
+        archive.unlink(missing_ok=True)
 
 
 # --- Perl -------------------------------------------------------------------
 
-def perl_ok(perl: str) -> bool:
-    """Native Windows Perl (not Git's msys Perl) with the modules the helper uses."""
+def perl_problem(perl: str) -> str:
+    """Why this Perl cannot run the helper, or "" if it can: it must be a
+    native Windows Perl (not Git's msys Perl) with IO::Socket::SSL, JSON::PP
+    and Digest::SHA."""
     try:
         check = subprocess.run(
             [perl, "-MIO::Socket::SSL", "-MJSON::PP", "-MDigest::SHA", "-e", "print $^O"],
             capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return check.returncode == 0 and check.stdout.strip() in ("MSWin32", "linux", "darwin")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"does not start ({exc})"
+    if check.returncode != 0:
+        missing = re.search(r"Can't locate (\S+)", check.stderr or "")
+        return f"lacks {missing.group(1)}" if missing else "cannot load its SSL/JSON modules"
+    if check.stdout.strip() not in ("MSWin32", "linux", "darwin"):
+        return f"is a {check.stdout.strip() or 'non-native'} Perl, not native Windows Perl"
+    return ""
+
+
+def perl_ok(perl: str) -> bool:
+    return perl_problem(perl) == ""
 
 
 def perl_candidates(settings: dict, cache: dict) -> list[str]:
@@ -76,40 +114,63 @@ def perl_candidates(settings: dict, cache: dict) -> list[str]:
     return [p for p in found if p and (Path(p).is_file() or shutil.which(p))]
 
 
+def portable_zip(releases) -> tuple[str, str]:
+    """(url, sha256) of the newest 64-bit portable Strawberry Perl in
+    releases.json, or ("", ""). The edition labels in that file are not
+    reliable, so the file name decides."""
+    for release in releases if isinstance(releases, list) else []:
+        if not isinstance(release, dict) or not str(release.get("archname", "")).startswith("MSWin32-x64"):
+            continue
+        for entry in (release.get("edition") or {}).values():
+            url = str((entry or {}).get("url", ""))
+            if url.endswith("-64bit-portable.zip"):
+                return url, str(entry.get("sha256", ""))
+    return "", ""
+
+
 def install_perl(say) -> str:
     """Strawberry Perl portable into tools/ (no installer, no admin rights)."""
-    say("Perl is not installed. Downloading Strawberry Perl (one time, about 300 MB) ...")
-    with urllib.request.urlopen(PERL_RELEASES, timeout=60) as response:
-        releases = json.load(response)
-    for release in releases:
-        if release.get("archname", "").startswith("MSWin32-x64"):
-            # The edition labels in releases.json are not reliable; match the file name.
-            for entry in (release.get("edition") or {}).values():
-                url = entry.get("url", "")
-                if url.endswith("-64bit-portable.zip"):
-                    archive = TOOLS / url.rsplit("/", 1)[-1]
-                    download(url, archive, say, entry.get("sha256", ""))
-                    say("  unpacking ...")
-                    target = TOOLS / "strawberry"
-                    shutil.rmtree(target, ignore_errors=True)
-                    with zipfile.ZipFile(archive) as zf:
-                        zf.extractall(target)
-                    archive.unlink(missing_ok=True)
-                    return str(target / "perl" / "bin" / "perl.exe")
-    raise SystemExit("Could not find a Strawberry Perl download. Install it from strawberryperl.com.")
+    say("Downloading Strawberry Perl (one time, about 300 MB) ...")
+    try:
+        with urllib.request.urlopen(PERL_RELEASES, timeout=60) as response:
+            releases = json.load(response)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Could not reach strawberryperl.com ({exc}). Check the internet connection "
+                         "and run again.") from None
+    url, sha256 = portable_zip(releases)
+    if not url:
+        raise SystemExit("strawberryperl.com lists no portable 64-bit Perl. Install Strawberry Perl "
+                         "from strawberryperl.com, then run again.")
+    archive = TOOLS / url.rsplit("/", 1)[-1]
+    download(url, archive, say, sha256)
+    target = TOOLS / "strawberry"
+    shutil.rmtree(target, ignore_errors=True)
+    extract(archive, target, say)
+    return str(target / "perl" / "bin" / "perl.exe")
 
 
 def find_perl(settings: dict, say) -> str:
     cache = load_cache()
-    for perl in perl_candidates(settings, cache):
-        if perl_ok(perl):
+    if settings.get("perl"):
+        problem = perl_problem(settings["perl"])
+        if problem:
+            raise SystemExit(f"The Perl set in settings.json ({settings['perl']}) {problem}. Remove "
+                             "\"perl\" from settings.json to use or fetch Strawberry Perl.")
+        return settings["perl"]
+    rejected = []
+    for perl in perl_candidates({}, cache):
+        problem = perl_problem(perl)
+        if not problem:
             if cache.get("perl") != perl:
                 cache["perl"] = perl
                 save_cache(cache)
             return perl
+        rejected.append(f"{perl} {problem}")
+    say("No usable Perl found" + (": " + "; ".join(rejected) if rejected else "") + ".")
     perl = install_perl(say)
-    if not perl_ok(perl):
-        raise SystemExit(f"The downloaded Perl at {perl} does not work.")
+    problem = perl_problem(perl)
+    if problem:
+        raise SystemExit(f"The downloaded Perl at {perl} {problem}.")
     cache["perl"] = perl
     save_cache(cache)
     return perl
@@ -139,19 +200,27 @@ def argyll_candidates(settings: dict, cache: dict) -> list[str]:
     return [b for b in bins if b and any((Path(b) / name).is_file() for name in ("spotread.exe", "spotread"))]
 
 
+def latest_argyll_link(page: str) -> str:
+    """Newest 64-bit Windows zip linked from argyllcms.com/downloadwin.html."""
+    links = re.findall(r'https?://[^"\'\s>]*Argyll_V[\d.]+_win64_exe\.zip', page or "")
+    return sorted(set(links), key=version_key)[-1] if links else ""
+
+
 def install_argyll(say) -> str:
     say("ArgyllCMS is not installed. Downloading it (one time, about 15 MB) ...")
-    with urllib.request.urlopen(ARGYLL_PAGE, timeout=60) as response:
-        page = response.read().decode("latin-1")
-    links = re.findall(r'https?://[^"\']*Argyll_V[\d.]+_win64_exe\.zip', page)
-    if not links:
-        raise SystemExit("Could not find the ArgyllCMS download. Install it from argyllcms.com.")
-    url = sorted(set(links), key=version_key)[-1]
+    try:
+        with urllib.request.urlopen(ARGYLL_PAGE, timeout=60) as response:
+            page = response.read().decode("latin-1")
+    except OSError as exc:
+        raise SystemExit(f"Could not reach argyllcms.com ({exc}). Check the internet connection "
+                         "and run again.") from None
+    url = latest_argyll_link(page)
+    if not url:
+        raise SystemExit("argyllcms.com lists no Windows download. Install ArgyllCMS from argyllcms.com, "
+                         "then run again.")
     archive = TOOLS / url.rsplit("/", 1)[-1]
     download(url, archive, say)
-    with zipfile.ZipFile(archive) as zf:
-        zf.extractall(TOOLS)
-    archive.unlink(missing_ok=True)
+    extract(archive, TOOLS, say)
     found = sorted(glob.glob(str(TOOLS / "Argyll*" / "bin")), key=version_key)
     if not found:
         raise SystemExit("The ArgyllCMS download did not contain spotread.")
@@ -160,7 +229,11 @@ def install_argyll(say) -> str:
 
 def find_argyll(settings: dict, say) -> Path:
     cache = load_cache()
-    candidates = argyll_candidates(settings, cache)
+    if settings.get("argyll_bin"):
+        if not argyll_candidates({"argyll_bin": settings["argyll_bin"]}, {})[:1]:
+            raise SystemExit(f"argyll_bin in settings.json ({settings['argyll_bin']}) has no spotread in it.")
+        return Path(settings["argyll_bin"])
+    candidates = argyll_candidates({}, cache)
     argyll = candidates[0] if candidates else install_argyll(say)
     if cache.get("argyll_bin") != argyll:
         cache["argyll_bin"] = argyll
@@ -211,9 +284,10 @@ def find_ccss(settings: dict) -> str:
 
 
 def meter_command(settings: dict, argyll_bin: Path, ccss: str) -> list[str]:
-    spotread = (settings.get("meter") or {}).get("spotread") or str(
+    meter = settings.get("meter") or {}
+    spotread = meter.get("spotread") or str(
         argyll_bin / ("spotread.exe" if (argyll_bin / "spotread.exe").exists() else "spotread"))
-    command = [spotread, *[str(a) for a in (settings.get("meter") or {}).get("args", ["-e"])]]
+    command = [spotread, *[str(a) for a in meter.get("args", ["-e"])]]
     if ccss:
         command += ["-X", ccss]
     return command

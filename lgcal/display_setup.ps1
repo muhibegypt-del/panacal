@@ -57,37 +57,47 @@ if ($topology -ne [DisplayTool]::TOPOLOGY_EXTEND -and $distinct.Count -lt 2) {
         $outputs = Get-Outputs
     }
 }
-$tv = Select-Tv $outputs
-if ($null -eq $tv) {
-    $names = ($outputs | ForEach-Object { "$($_.gdi) '$($_.name)'" }) -join ', '
-    throw "Could not tell which display is the LG TV. Windows sees: $names"
-}
 $hdrChanged = $false
-if ($tv.hdr_on) {
-    if ([DisplayTool]::SetHdr($tv.adapter_low, $tv.adapter_high, $tv.target, $false) -eq 0) {
-        $hdrChanged = $true
-        Start-Sleep -Seconds 3
-        $refreshed = @(Get-Outputs | Where-Object { $_.target -eq $tv.target -and $_.adapter_low -eq $tv.adapter_low })
-        if ($refreshed.Count -gt 0) { $tv = $refreshed[0] }
-    }
-}
-# Night light tints the whole desktop warm through the GPU; a calibration
-# measured through it would bake the tint into the TV. Windows keeps its on
-# state in this CloudStore blob (byte 18 is 0x15 while it is on).
-$nightLight = $false
+$tv = $null
 try {
-    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\default$windows.data.bluelightreduction.bluelightreductionstate\windows.data.bluelightreduction.bluelightreductionstate'
-    $data = (Get-ItemProperty -LiteralPath $key -Name Data -ErrorAction Stop).Data
-    if ($data.Length -gt 18 -and $data[18] -eq 0x15) { $nightLight = $true }
-} catch { }
-$state = [ordered]@{
-    device = $tv.gdi; name = $tv.name; primary = $tv.primary
-    width = $tv.width; height = $tv.height; bits = $tv.bits; hdr_on = $tv.hdr_on
-    adapter_low = $tv.adapter_low; adapter_high = $tv.adapter_high; target = $tv.target
-    topology_before = $topology; topology_changed = $topologyChanged; hdr_changed = $hdrChanged
-    night_light = $nightLight
-    outputs = @($outputs | ForEach-Object { "$($_.gdi) '$($_.name)' primary=$($_.primary)" })
+    $tv = Select-Tv $outputs
+    if ($null -eq $tv) {
+        $names = ($outputs | ForEach-Object { "$($_.gdi) '$($_.name)'" }) -join ', '
+        throw "Could not tell which display is the LG TV. Windows sees: $names"
+    }
+    if ($tv.hdr_on) {
+        if ([DisplayTool]::SetHdr($tv.adapter_low, $tv.adapter_high, $tv.target, $false) -eq 0) {
+            $hdrChanged = $true
+            Start-Sleep -Seconds 3
+            $refreshed = @(Get-Outputs | Where-Object { $_.target -eq $tv.target -and $_.adapter_low -eq $tv.adapter_low })
+            if ($refreshed.Count -gt 0) { $tv = $refreshed[0] }
+        }
+    }
+    # Night light tints the whole desktop warm through the GPU; a calibration
+    # measured through it would bake the tint into the TV. Windows keeps its on
+    # state in this CloudStore blob (byte 18 is 0x15 while it is on).
+    $nightLight = $false
+    try {
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\default$windows.data.bluelightreduction.bluelightreductionstate\windows.data.bluelightreduction.bluelightreductionstate'
+        $data = (Get-ItemProperty -LiteralPath $key -Name Data -ErrorAction Stop).Data
+        if ($data.Length -gt 18 -and $data[18] -eq 0x15) { $nightLight = $true }
+    } catch {
+        # No such key: Night light has never been switched on on this PC.
+    }
+    $state = [ordered]@{
+        device = $tv.gdi; name = $tv.name; primary = $tv.primary
+        width = $tv.width; height = $tv.height; bits = $tv.bits; hdr_on = $tv.hdr_on
+        adapter_low = $tv.adapter_low; adapter_high = $tv.adapter_high; target = $tv.target
+        topology_before = $topology; topology_changed = $topologyChanged; hdr_changed = $hdrChanged
+        night_light = $nightLight
+        outputs = @($outputs | ForEach-Object { "$($_.gdi) '$($_.name)' primary=$($_.primary)" })
+    }
+    $json = $state | ConvertTo-Json -Depth 3
+    Set-Content -LiteralPath $StateFile -Value $json -Encoding UTF8
+    Write-Output $json
+} catch {
+    # Leave Windows as it was found before reporting the failure.
+    if ($hdrChanged) { [DisplayTool]::SetHdr($tv.adapter_low, $tv.adapter_high, $tv.target, $true) | Out-Null }
+    if ($topologyChanged -and $topology -ne 0) { [DisplayTool]::SetTopology($topology) | Out-Null }
+    throw
 }
-$json = $state | ConvertTo-Json -Depth 3
-Set-Content -LiteralPath $StateFile -Value $json -Encoding UTF8
-Write-Output $json

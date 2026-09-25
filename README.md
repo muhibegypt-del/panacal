@@ -9,14 +9,14 @@ This runs BigShoots' **PGenerator-Plus LG AutoCal** from a Windows PC, with no R
 3. The first time only, type the PIN the TV shows.
 4. When asked, put the meter on the white patch in the middle of the TV. It starts by itself.
 
-There is nothing to configure. On each run it:
+There is nothing to configure. Everything that could stop the run (tools, TV, display, meter, video range) is checked before the TV is changed. On each run it:
 
 | Step | What it does |
 |---|---|
 | Tools | Finds Perl and ArgyllCMS. If either is missing, it downloads it into `tools\` (one time; no installer and no admin rights). |
 | TV | Finds the LG on the network, pairs once, and remembers it. |
 | Picture mode | Calibrates the mode the TV is in (Expert, Filmmaker, Cinema, ...). If an older TV cannot report its mode, it asks you which one it is showing. It first closes a calibration session left open by a crashed run. |
-| TV preparation | Does what PGenerator's wizard does before calibrating. It resets the picture mode to factory, which also turns off energy saving and dynamic processing. It clears the white balance and 1D LUT (the TV must confirm and verify this), and clears any leftover 3D LUT or matrix. Your OLED brightness is read first and put back. |
+| TV preparation | Once the meter is in place and the signal chain checks out, it does what PGenerator's wizard does before calibrating. It resets the picture mode to factory, which also turns off energy saving and dynamic processing. It clears the white balance and 1D LUT (the TV must confirm and verify this), and clears any leftover 3D LUT or matrix. Your OLED brightness is read first and put back. |
 | Display | Finds the TV's output by name. Switches Windows from Duplicate to Extend, and turns Windows HDR off on the TV. Clears the GPU video LUT and keeps Windows from blanking the screen during the run. All of this is restored afterwards. If Windows Night light is on, it stops and says so, because Night light would be calibrated into the TV. |
 | Meter | Uses a WOLED `.ccss` correction if one is installed (ArgyllCMS, DisplayCAL or the `ccss` folder). It notices the meter on the patch by flashing the patch to black. |
 | Video range | Measures whether the TV expects full or limited range and draws patterns to match, so the TV's Black Level setting can stay as it is. If the PC sends limited range to a TV set to full, black is lifted; it stops before changing anything and says which setting to change. |
@@ -25,13 +25,15 @@ There is nothing to configure. On each run it:
 
 Ctrl+C stops safely. The worker finishes its current write and closes calibration mode.
 
+Whenever a run stops, the last lines say why, what state the TV was left in (untouched, reset but not yet calibrated, or partly calibrated), and where the session folder is.
+
 **Undo LG AutoCal.bat** returns the TV's current picture mode to its factory white balance and LUTs.
 
 Each run keeps everything in `sessions\<date_time>\`: `console.txt` (what the window showed), every reading and TV request, the worker's log and state, and `verification.json`.
 
 ## Optional overrides
 
-Copy `settings.example.json` to `settings.json` only to change a default:
+Copy `settings.example.json` to `settings.json` only to change a default. The file is checked before anything starts: every wrong value is listed at once, and a misspelt setting name is pointed out rather than ignored.
 
 | Setting | Default | Meaning |
 |---|---|---|

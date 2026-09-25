@@ -1,10 +1,10 @@
 """LG AutoCal on a Windows PC, in one click.
 
 Finds (or fetches) Perl and ArgyllCMS, finds the TV on the network, pairs
-only if needed, prepares the Windows display, waits for the meter, measures
-which video range the TV expects, runs PGenerator-Plus's AutoCal worker
-(meter_lg_autocal.pl, see PATCHES.md), verifies the result, and puts
-Windows back as it was.
+only if needed, prepares the TV and the Windows display, waits for the
+meter, measures which video range the TV expects, runs PGenerator-Plus's
+AutoCal worker (meter_lg_autocal.pl, see PATCHES.md), verifies the result,
+and puts Windows back as it was.
 """
 from __future__ import annotations
 
@@ -12,12 +12,13 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
+from . import settings as settings_file
 from .discover import discover
 from .display import DisplaySetup
 from .lg import LG
@@ -26,8 +27,8 @@ from .patterns import PatternWindow
 from .prepare import clear_calibration, prepare
 from .server import Api, MeterService, make_server
 from .setup import find_argyll, find_ccss, find_perl, meter_command
-from .signal import Reader, detect_range, verify, wait_for_meter
-from .steps import PICTURE_MODES, TARGET_GAMMAS, build_config
+from .signal import Reader, detect_range, measure_white, verify, wait_for_meter
+from .steps import PICTURE_MODES, build_config
 
 ROOT = Path(__file__).resolve().parents[1]
 PGEN = ROOT / "pgen"
@@ -39,7 +40,8 @@ SESSIONS = ROOT / "sessions"
 MODE_NAMES = {"expert1": "Expert (Bright Room)", "expert2": "Expert (Dark Room)", "filmMaker": "Filmmaker",
               "cinema": "Cinema", "game": "Game Optimizer", "normal": "Standard", "eco": "Eco",
               "sports": "Sports", "vivid": "Vivid", "personalized": "Personalised"}
-DEFAULTS = {"target_gamma": "bt1886", "target_delta_e": 0.5, "patch_size": 10, "api_port": 8765}
+DEFAULTS = settings_file.validate({})[0]
+HEARTBEAT = 90          # seconds without a progress line before "still working"
 
 
 class Log:
@@ -56,9 +58,10 @@ class Log:
     def close(self) -> None:
         if self.file:
             self.file.close()
+            self.file = None
 
 
-CONSOLE: list = []   # open session console logs
+CONSOLE: list = []   # console.txt of the open session, if any
 
 
 def say(message: str = "") -> None:
@@ -66,6 +69,40 @@ def say(message: str = "") -> None:
     for handle in CONSOLE:
         handle.write(message + "\n")
         handle.flush()
+
+
+def ask(prompt: str, answer=input) -> str:
+    """Console input; a closed console stops the run with a reason."""
+    try:
+        reply = answer(prompt)
+    except EOFError:
+        raise SystemExit("No keyboard input available (the console was closed).") from None
+    for handle in CONSOLE:
+        handle.write(prompt + str(reply) + "\n")
+    return str(reply).strip()
+
+
+class Session:
+    """One folder per run under sessions/: autocal.log (everything),
+    console.txt (what the window showed). Always closed, whatever happens."""
+
+    def __init__(self, directory: Path | None = None, suffix: str = ""):
+        self.directory = directory or SESSIONS / (datetime.now().strftime("%Y%m%d_%H%M%S") + suffix)
+        self.log = None
+        self.console = None
+
+    def __enter__(self) -> "Session":
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.log = Log(self.directory / "autocal.log")
+        self.console = (self.directory / "console.txt").open("a", encoding="utf-8")
+        CONSOLE.append(self.console)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self.console in CONSOLE:
+            CONSOLE.remove(self.console)
+        self.console.close()
+        self.log.close()
 
 
 def free_port(preferred: int) -> int:
@@ -82,9 +119,9 @@ def free_port(preferred: int) -> int:
 
 
 def keep_awake(on: bool) -> None:
-    """Stop Windows blanking the TV or sleeping during a 30-minute run with
-    no keyboard or mouse input (ES_CONTINUOUS | ES_SYSTEM_REQUIRED |
-    ES_DISPLAY_REQUIRED; cleared again afterwards)."""
+    """Stop Windows blanking the TV or sleeping during a long run with no
+    keyboard or mouse input (ES_CONTINUOUS | ES_SYSTEM_REQUIRED |
+    ES_DISPLAY_REQUIRED), and clear it again afterwards."""
     if os.name != "nt":
         return
     import ctypes
@@ -93,7 +130,8 @@ def keep_awake(on: bool) -> None:
 
 def console_click_proof() -> None:
     """Clicking a Windows console with QuickEdit on pauses the program until
-    a key is pressed; turn QuickEdit off for this window."""
+    a key is pressed; turn QuickEdit off for this window. Purely cosmetic:
+    if the console does not allow it, nothing else changes."""
     if os.name != "nt":
         return
     try:
@@ -103,20 +141,18 @@ def console_click_proof() -> None:
         mode = ctypes.c_uint32()
         if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             kernel32.SetConsoleMode(handle, (mode.value & ~0x0040) | 0x0080)
-    except Exception:
+    except (OSError, AttributeError):
         pass
 
 
 def load_settings(path: Path = SETTINGS) -> dict:
-    """Optional overrides; everything works without the file."""
-    settings = dict(DEFAULTS)
-    if path.is_file():
-        try:
-            settings.update(json.loads(path.read_text(encoding="utf-8")))
-        except ValueError as exc:
-            raise SystemExit(f"{path} is not valid JSON: {exc}")
-    if str(settings["target_gamma"]).lower() not in TARGET_GAMMAS:
-        raise SystemExit(f"target_gamma must be one of {', '.join(TARGET_GAMMAS)}")
+    """Optional overrides, validated before anything touches the TV."""
+    try:
+        settings, warnings = settings_file.load(path)
+    except ValueError as exc:
+        raise SystemExit(f"{exc}\nFix settings.json (or delete it to use the defaults) and run again.")
+    for warning in warnings:
+        say(f"Note: {warning}.")
     return settings
 
 
@@ -137,13 +173,23 @@ def perl_env(session_dir: Path | None, port: int | None, helper: Path = HELPER) 
 
 # --- the TV -----------------------------------------------------------------
 
+def choose_number(prompt: str, count: int, answer=input) -> int:
+    """Ask until a number 1..count is typed; returns a 0-based index."""
+    while True:
+        reply = ask(prompt, answer)
+        if reply.isdigit() and 1 <= int(reply) <= count:
+            return int(reply) - 1
+        say(f"  Please type a number from 1 to {count}.")
+
+
 def find_tv(lg: LG, settings: dict, pin_input=input) -> str:
     clients = lg.load_clients()
     known = settings.get("tv_ip") or clients.get("ip") or clients.get("manual_ip") or ""
     tvs = discover(lg.probe, known, say)
     if not tvs:
         raise SystemExit("No LG TV answered on the network. Check that the TV is on, on the same network as "
-                         "this PC, and that LG Connect Apps is enabled in the TV's network settings.")
+                         "this PC, and that LG Connect Apps is enabled in the TV's network settings. "
+                         "If the network blocks discovery, put its address in settings.json as \"tv_ip\".")
     tv = tvs[0]
     if len(tvs) > 1:
         paired_uuid = str((clients.get("hello_info") or {}).get("deviceUUID") or "").lower()
@@ -153,34 +199,43 @@ def find_tv(lg: LG, settings: dict, pin_input=input) -> str:
         else:
             for number, item in enumerate(tvs, 1):
                 say(f"  {number}. {item.get('model_name') or 'LG TV'} at {item['ip']}")
-            choice = pin_input("More than one LG TV found. Type the number of the one to calibrate: ").strip()
-            tv = tvs[int(choice) - 1] if choice.isdigit() and 0 < int(choice) <= len(tvs) else tvs[0]
+            tv = tvs[choose_number("More than one LG TV found. Type the number of the one to calibrate: ",
+                                   len(tvs), pin_input)]
     say(f"TV: {tv.get('model_name') or 'LG TV'} at {tv['ip']}")
     ensure_paired(lg, tv["ip"], pin_input)
     return tv["ip"]
 
 
 def ensure_paired(lg: LG, ip: str, pin_input=input) -> None:
+    say("Connecting to the TV ...")
     result = lg.connect(ip)
     if result.get("status") == "ok" and result.get("client_key"):
         return
     say("Pairing with the TV (first time only). If the TV asks to allow the connection, accept it.")
     process, state_file, pin_file = lg.start_pin_pairing(ip, DATA_DIR / "pin-session")
-    state = wait_pin_state(state_file, process, ("pending", "ok", "error"), 30)
-    if state.get("status") == "pending":
-        pin = ""
-        while not pin.isdigit() or not 4 <= len(pin) <= 8:
-            pin = pin_input("Type the PIN shown on the TV and press Enter: ").strip()
-        temporary = pin_file.with_suffix(".tmp")
-        temporary.write_text(pin + "\n", encoding="utf-8")
-        os.replace(temporary, pin_file)
-        state = wait_pin_state(state_file, process, ("ok", "error"), 90)
     try:
-        process.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        process.kill()
+        state = wait_pin_state(state_file, process, ("pending", "ok", "error"), 30)
+        if state.get("status") == "pending":
+            pin = ""
+            while not (pin.isdigit() and 4 <= len(pin) <= 8):
+                pin = ask("Type the PIN shown on the TV and press Enter: ", pin_input)
+            temporary = pin_file.with_suffix(".tmp")
+            temporary.write_text(pin + "\n", encoding="utf-8")
+            os.replace(temporary, pin_file)
+            state = wait_pin_state(state_file, process, ("ok", "error"), 90)
+    finally:
+        # The helper waits up to 150 s for a PIN; never leave it behind.
+        if process.poll() is None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        for leftover in (pin_file, pin_file.with_suffix(".tmp")):
+            leftover.unlink(missing_ok=True)
     if state.get("status") != "ok":
-        raise SystemExit("Pairing failed: " + (state.get("message") or "no answer from the TV"))
+        raise SystemExit("Pairing failed: " + (state.get("message") or "no answer from the TV") +
+                         ". Check the TV is on, then run again.")
     lg.update_connect_metadata(state, ip)
     say("Paired. The TV will not ask again.")
 
@@ -193,14 +248,14 @@ def wait_pin_state(path: Path, process, wanted: tuple, timeout: float) -> dict:
             if state.get("status") in wanted:
                 return state
         except (OSError, ValueError):
-            pass
+            pass            # not written yet, or mid-write: read again shortly
         if process.poll() is not None and not path.exists():
-            break
+            return {"status": "error", "message": "The pairing helper stopped before the TV answered"}
         time.sleep(0.25)
-    return {"status": "error", "message": "The TV did not answer the pairing request in time."}
+    return {"status": "error", "message": "The TV did not answer the pairing request in time"}
 
 
-def choose_picture_mode(lg: LG, settings: dict, ask=input) -> str:
+def choose_picture_mode(lg: LG, settings: dict, ask_input=input) -> str:
     mode = settings.get("picture_mode") or lg.current_picture_mode()
     if mode in PICTURE_MODES:
         say(f"Calibrating the picture mode the TV is in: {MODE_NAMES.get(mode, mode)}")
@@ -211,76 +266,88 @@ def choose_picture_mode(lg: LG, settings: dict, ask=input) -> str:
     choices = list(PICTURE_MODES)
     for number, key in enumerate(choices, 1):
         say(f"  {number}. {MODE_NAMES.get(key, key)}")
-    while True:
-        answer = ask("Which picture mode is the TV showing? Type its number: ").strip()
-        if answer.isdigit() and 1 <= int(answer) <= len(choices):
-            return choices[int(answer) - 1]
+    return choices[choose_number("Which picture mode is the TV showing? Type its number: ",
+                                 len(choices), ask_input)]
 
 
 # --- run --------------------------------------------------------------------
+
+TV_STATE = {
+    "untouched": "Nothing on the TV was changed.",
+    "prepared": ("The picture mode was reset and its calibration cleared, so the TV now shows its factory "
+                 "white balance. Run again to calibrate it."),
+    "calibrating": ("The TV keeps the 1D LUT from the last finished step. Run again for a complete "
+                    "calibration, or use 'Undo LG AutoCal.bat' to return it to factory."),
+    "calibrated": "The calibration is saved in the TV.",
+}
+
 
 def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl: str | None = None,
         session_dir: Path | None = None, extra_env: dict | None = None, config_overrides: dict | None = None,
         delay_scale: float = 1.0, find_tv_on_network: bool = True, pin_input=input,
         reset_first: bool = True) -> int:
-    """One complete AutoCal. The keyword hooks exist for the offline simulation."""
-    session_dir = session_dir or SESSIONS / datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_dir.mkdir(parents=True, exist_ok=True)
-    log = Log(session_dir / "autocal.log")
-    console = (session_dir / "console.txt").open("a", encoding="utf-8")
-    CONSOLE.append(console)
-    keep_awake(True)
+    """One complete AutoCal. Returns 0 on success, 1 on failure, 2 for a
+    deliberate stop with a reason. The keyword hooks exist for the offline
+    simulation."""
+    with Session(session_dir) as session:
+        tv_state = ["untouched"]
+        keep_awake(True)
+        try:
+            code = _run(session, settings, tv_state, pattern=pattern, meter=meter, helper=helper, perl=perl,
+                        extra_env=extra_env, config_overrides=config_overrides, delay_scale=delay_scale,
+                        find_tv_on_network=find_tv_on_network, pin_input=pin_input, reset_first=reset_first)
+        except KeyboardInterrupt:
+            say("Stopped.")
+            code = 1
+        except SystemExit as exc:
+            if isinstance(exc.code, int) or exc.code is None:
+                raise
+            say(str(exc.code))       # a deliberate stop with its reason
+            code = 2
+        except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
+            session.log("STOPPED " + traceback.format_exc())
+            say(f"Stopped: {exc}")
+            code = 1
+        except Exception as exc:
+            session.log("UNEXPECTED " + traceback.format_exc())
+            say(f"Stopped by an unexpected error ({exc!r}). The full error is in autocal.log; "
+                "please send the session folder.")
+            code = 1
+        finally:
+            keep_awake(False)
+        say(TV_STATE[tv_state[0]])
+        say(f"Everything from this run is in {session.directory}")
+        return code
+
+
+def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, helper, perl, extra_env,
+         config_overrides, delay_scale, find_tv_on_network, pin_input, reset_first) -> int:
+    log = session.log
     perl = perl or find_perl(settings, say)
     port = free_port(int(settings.get("api_port") or 8765))
-    env = perl_env(session_dir, port, helper)
-    env.update(extra_env or {})
+    env = {**perl_env(session.directory, port, helper), **(extra_env or {})}
     lg = LG(perl, helper, DATA_DIR, log, env)
     owned = []
     server = None
     worker = None
+    worker_log = None
     try:
         if find_tv_on_network:
             find_tv(lg, settings, pin_input)
         elif not lg.client_key(lg.load_clients()):
             raise SystemExit("The TV is not paired.")
-        if lg.clear_stale_calibration_mode():
-            say("Closed a calibration session left open by an earlier run.")
+        stale = lg.clear_stale_calibration_mode()
+        if stale is not None:
+            say("Closed a calibration session left open by an earlier run." if stale.get("status") == "ok" else
+                "An earlier run left the TV in calibration mode and it could not be closed "
+                f"({stale.get('message')}); continuing, the reset below closes it.")
         picture_mode = choose_picture_mode(lg, settings, pin_input)
-        if reset_first:
-            prepare(lg, picture_mode, MODE_NAMES.get(picture_mode, picture_mode), say,
-                    sleep=lambda s: time.sleep(s * delay_scale),
-                    factory_reset=bool(settings.get("reset_picture_mode", True)))
 
+        # Everything that can stop the run is checked before the TV is
+        # touched: display, meter and the video-range chain.
         if pattern is None:
             argyll = find_argyll(settings, say)
-            display = DisplaySetup(session_dir, log)
-            owned.append(display)
-            try:
-                state = display.prepare()
-                say(f"Patterns go to {state.get('name') or 'the TV'} ({state['device']})"
-                    + ("; Windows switched to Extend for the run" if state.get("topology_changed") else "")
-                    + ("; Windows HDR turned off for the run" if state.get("hdr_changed") else ""))
-                if int(state.get("bits") or 8) > 8:
-                    log(f"NOTE output is {state['bits']} bpc; 8-bit patterns are expanded by the GPU")
-                if state.get("night_light"):
-                    raise SystemExit("Windows Night light is on. It tints everything the PC sends, and the "
-                                     "calibration would bake that tint into the TV. Turn it off (Settings > "
-                                     "System > Display > Night light) and run again.")
-            except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
-                log(f"DISPLAY automatic setup failed: {exc}")
-                say("Could not set up the display automatically; using the second screen as it is.")
-                state = {"device": ""}
-            pattern = PatternWindow(session_dir, log, state["device"])
-            owned.append(pattern)
-            pattern.start()
-            dispwin = argyll / "dispwin.exe"
-            if dispwin.is_file():
-                try:
-                    pattern.linearize_video_lut(dispwin)
-                except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
-                    log(f"PATTERN video LUT not linearised: {exc}")
-                    say("Note: could not reset the PC's video LUT for the TV; if a colour profile is "
-                        "loaded for it, results may be off.")
+            pattern = open_pattern_window(session, argyll, owned)
         if meter is None:
             argyll = find_argyll(settings, say)
             ccss = find_ccss(settings)
@@ -291,33 +358,46 @@ def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl
             meter = Meter(meter_command(settings, argyll, ccss), log)
             owned.append(meter)
 
-        size = int(settings.get("patch_size") or 10)
-        reader = Reader(pattern, meter, log, size, settle_scale=delay_scale)
+        reader = Reader(pattern, meter, log, int(settings.get("patch_size") or 10), settle_scale=delay_scale)
         white = wait_for_meter(reader, say)
         limited = detect_range(reader, white["Y"], say)
+        if reset_first:
+            tv_state[0] = "prepared"
+            prepare(lg, picture_mode, MODE_NAMES.get(picture_mode, picture_mode), say,
+                    sleep=lambda s: time.sleep(s * delay_scale),
+                    factory_reset=bool(settings.get("reset_picture_mode", True)))
+            # The reset changes white (contrast, gamma) and can change the
+            # TV's Black Level, so both are measured again.
+            white = measure_white(reader, say)
+            before = limited
+            limited = detect_range(reader, white["Y"], lambda _message: None)
+            if limited != before:
+                say("After the reset the TV expects " + ("limited" if limited else "full") +
+                    "-range video; patterns follow it.")
         config = build_config(settings, white["Y"], limited=limited, picture_mode=picture_mode)
         config.update(config_overrides or {})
 
-        service = MeterService(pattern, meter, log, bool((settings.get("meter") or {}).get("synthetic_black", True)))
+        meter_settings = settings.get("meter") or {}
+        service = MeterService(pattern, meter, log, bool(meter_settings.get("synthetic_black", True)))
         service.delay_scale = delay_scale
         server = make_server(Api(service, lg, log), port)
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
-        config_file = session_dir / "worker_config.json"
-        state_file = session_dir / "worker_state.json"
-        stop_file = session_dir / "worker.stop"
+        state_file = session.directory / "worker_state.json"
+        stop_file = session.directory / "worker.stop"
+        config_file = session.directory / "worker_config.json"
         config_file.write_text(json.dumps(config, indent=1), encoding="utf-8")
         state_file.write_text(json.dumps({"status": "running", "autocal": True, "current_step": 0,
                                           "total_steps": 0, "current_name": "Starting",
                                           "message": "Starting", "readings": []}), encoding="utf-8")
-        worker_log = (session_dir / "worker.log").open("w", encoding="utf-8")
-        full_env = os.environ.copy()
-        full_env.update(env)
+        worker_log = (session.directory / "worker.log").open("w", encoding="utf-8")
+        tv_state[0] = "calibrating"
         worker = subprocess.Popen(
             # Forward slashes: the worker finds its modules by splitting its
             # own path on "/".
             [perl, WORKER.as_posix(), config_file.as_posix(), state_file.as_posix(), stop_file.as_posix()],
-            env=full_env, stdout=worker_log, stderr=subprocess.STDOUT, cwd=str(session_dir),
+            env={**os.environ, **env}, stdout=worker_log, stderr=subprocess.STDOUT,
+            cwd=str(session.directory),
             # Ctrl+C must not reach the worker or a helper mid-write to the
             # TV; stopping goes through the stop file, as on the Pi.
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
@@ -325,51 +405,81 @@ def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl
         say("Calibrating. Leave the meter where it is; Ctrl+C stops safely.")
         final = monitor(worker, state_file, stop_file)
         worker_log.close()
-        ok = report(final)
+        ok = report(final, session.directory / "worker.log")
         if ok:
+            tv_state[0] = "calibrated"
             result = verify(reader, config["target_gamma"], limited, say)
-            (session_dir / "verification.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
-        say(f"Everything from this run is in {session_dir}")
+            (session.directory / "verification.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
         return 0 if ok else 1
-    except KeyboardInterrupt:
-        say("Stopped.")
-        return 1
-    except SystemExit as exc:
-        # A deliberate stop with a reason (lifted black, Night light, ...).
-        if not isinstance(exc.code, int):
-            say(str(exc.code))
-            return 2
-        raise
-    except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
-        say(f"Stopped: {exc}")
-        return 1
     finally:
         if worker is not None and worker.poll() is None:
             worker.kill()
+            worker.wait(timeout=10)
             # A killed worker cannot close calibration mode itself.
-            lg.clear_stale_calibration_mode()
+            closed = lg.clear_stale_calibration_mode()
+            if closed is not None and closed.get("status") != "ok":
+                say("The TV may still be in calibration mode; switching it off and on clears it.")
+        if worker_log is not None:
+            worker_log.close()
         if server is not None:
             server.shutdown()
             server.server_close()
         for resource in reversed(owned):
             try:
                 resource.close()
-            except Exception as exc:
-                log(f"close failed: {exc}")
-        keep_awake(False)
-        CONSOLE.remove(console)
-        console.close()
-        log.close()
+            except Exception as exc:  # keep closing the rest; report it
+                log(f"close failed for {type(resource).__name__}: {exc!r}")
+                say(f"Note: could not close the {type(resource).__name__} cleanly ({exc}).")
+
+
+def open_pattern_window(session: Session, argyll: Path, owned: list) -> PatternWindow:
+    """Windows display prepared (Extend, HDR off), pattern window on the TV,
+    video LUT linear. Everything added to `owned` is undone on exit."""
+    log = session.log
+    display = DisplaySetup(session.directory, log, say=say)
+    owned.append(display)
+    try:
+        state = display.prepare()
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        log(f"DISPLAY automatic setup failed: {exc}")
+        say(f"Could not set up the display automatically ({str(exc).splitlines()[0][:200]}); "
+            "using the second screen as it is.")
+        state = {"device": ""}
+    else:
+        say(f"Patterns go to {state.get('name') or 'the TV'} ({state['device']})"
+            + ("; Windows switched to Extend for the run" if state.get("topology_changed") else "")
+            + ("; Windows HDR turned off for the run" if state.get("hdr_changed") else ""))
+        if int(state.get("bits") or 8) > 8:
+            log(f"NOTE output is {state['bits']} bpc; 8-bit patterns are expanded by the GPU")
+        if state.get("night_light"):
+            raise SystemExit("Windows Night light is on. It tints everything the PC sends, and the "
+                             "calibration would bake that tint into the TV. Turn it off (Settings > "
+                             "System > Display > Night light) and run again.")
+    pattern = PatternWindow(session.directory, log, state["device"])
+    owned.append(pattern)
+    pattern.start()
+    dispwin = argyll / "dispwin.exe"
+    if dispwin.is_file():
+        try:
+            pattern.linearize_video_lut(dispwin)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            log(f"PATTERN video LUT not linearised: {exc}")
+            say("Note: could not reset the PC's video LUT for the TV; if a colour profile is "
+                "loaded for it, results may be off.")
+    return pattern
 
 
 def read_state(path: Path) -> dict:
+    """The worker's state file; {} if it cannot be read after 5 tries (it is
+    replaced atomically, so a failed read only means "try again")."""
     for _ in range(5):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return data
         except (OSError, ValueError):
-            time.sleep(0.05)
+            pass
+        time.sleep(0.05)
     return {}
 
 
@@ -385,17 +495,21 @@ def final_state(path: Path) -> dict:
     return read_state(path)
 
 
-def monitor(worker: subprocess.Popen, state_file: Path, stop_file: Path) -> dict:
-    started = time.monotonic()
-    last = None
+def monitor(worker: subprocess.Popen, state_file: Path, stop_file: Path, clock=time.monotonic) -> dict:
+    started = clock()
+    last, last_change = None, started
     stopping = False
     while True:
         try:
             done = worker.poll() is not None
-            line = progress_line(read_state(state_file), time.monotonic() - started)
+            state = read_state(state_file)
+            line = progress_line(state, clock() - started)
             if line and line != last:
                 say(line)
-                last = line
+                last, last_change = line, clock()
+            elif clock() - last_change >= HEARTBEAT:
+                last_change = clock()
+                say(f"  ... still working ({state.get('message') or 'waiting for the meter or the TV'})")
             if done:
                 return final_state(state_file)
             time.sleep(1.0)
@@ -403,12 +517,13 @@ def monitor(worker: subprocess.Popen, state_file: Path, stop_file: Path) -> dict
             if stopping:
                 raise
             stopping = True
-            say("Stopping: the worker is closing the TV's calibration session (up to 2 minutes) ...")
+            say("Stopping: the worker is closing the TV's calibration session (up to 2 minutes; "
+                "press Ctrl+C again to force it) ...")
             stop_file.write_text("stop\n", encoding="utf-8")
             try:
                 worker.wait(timeout=150)
             except subprocess.TimeoutExpired:
-                pass
+                say("The worker did not stop in time; forcing it.")
 
 
 def progress_line(state: dict, elapsed: float) -> str:
@@ -416,20 +531,36 @@ def progress_line(state: dict, elapsed: float) -> str:
     name = str(state.get("current_name") or "")
     if not name:
         return ""
-    step, total = int(state.get("current_step") or 0), int(state.get("total_steps") or 0)
+    try:
+        step, total = int(state.get("current_step") or 0), int(state.get("total_steps") or 0)
+    except (TypeError, ValueError):
+        step, total = 0, 0
     label = name.replace("SDR26 1D DPG ", "").replace("sdr26_", "")
     clock = f"{int(elapsed // 60):02d}:{int(elapsed % 60):02d}"
-    if total and 3 <= step < total:
+    if total > 0 and 3 <= step < total:
         left = elapsed / step * (total - step)
         return f"[{clock}] {step}/{total} {label}  (about {max(1, round(left / 60))} min left)"
-    return f"[{clock}] {f'{step}/{total} ' if total else ''}{label}"
+    return f"[{clock}] {f'{step}/{total} ' if total > 0 else ''}{label}"
 
 
-def report(state: dict) -> bool:
+def tail(path: Path, lines: int = 6) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return [line for line in text if line.strip()][-lines:]
+
+
+def report(state: dict, worker_log: Path) -> bool:
     status = state.get("status") or "unknown"
     say("")
     if status != "complete":
-        say(f"AutoCal did not finish: {state.get('message') or status}")
+        say(f"AutoCal did not finish: {state.get('message') or 'the worker stopped without a status'}")
+        last = tail(worker_log)
+        if last:
+            say("Last lines of worker.log:")
+            for line in last:
+                say("  " + line[:200])
         return False
     final_de = state.get("sdr_1d_dpg_final_de")
     say("AutoCal finished" + (f": worst level during calibration dE ITP {final_de:.2f}"
@@ -439,28 +570,39 @@ def report(state: dict) -> bool:
     return True
 
 
+def pair_or_undo(settings: dict, command: str) -> int:
+    with Session(suffix="_" + command) as session:
+        try:
+            perl = find_perl(settings, say)
+            lg = LG(perl, HELPER, DATA_DIR, session.log, perl_env(None, None))
+            find_tv(lg, settings)
+            if command == "undo":
+                lg.clear_stale_calibration_mode()
+                mode = choose_picture_mode(lg, settings)
+                clear_calibration(lg, mode, say)
+                say(f"{MODE_NAMES.get(mode, mode)} is back to the TV's factory white balance and LUTs.")
+            return 0
+        except KeyboardInterrupt:
+            say("Stopped.")
+        except SystemExit as exc:
+            if isinstance(exc.code, int) or exc.code is None:
+                raise
+            say(str(exc.code))
+        except Exception as exc:
+            session.log("STOPPED " + traceback.format_exc())
+            say(f"Stopped: {exc}")
+        say(f"Details are in {session.directory}")
+        return 1
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="LG OLED AutoCal on a PC (PGenerator-Plus worker)")
     parser.add_argument("command", nargs="?", default="run", choices=["run", "pair", "undo"],
                         help="run (default); pair: only find and pair the TV; "
                              "undo: return the TV's white balance and LUTs to factory")
     args = parser.parse_args(argv)
-    settings = load_settings()
     console_click_proof()
-    try:
-        if args.command in ("pair", "undo"):
-            perl = find_perl(settings, say)
-            lg = LG(perl, HELPER, DATA_DIR, Log(), perl_env(None, None))
-            find_tv(lg, settings)
-            if args.command == "undo":
-                lg.clear_stale_calibration_mode()
-                mode = choose_picture_mode(lg, settings)
-                clear_calibration(lg, mode, say)
-                say(f"{MODE_NAMES.get(mode, mode)} is back to the TV's factory white balance and LUTs.")
-            return 0
-        return run(settings)
-    except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
-        say("")
-        say(f"Stopped: {exc}")
-        say(f"Details are in the newest folder under {SESSIONS}")
-        return 1
+    settings = load_settings()
+    if args.command in ("pair", "undo"):
+        return pair_or_undo(settings, args.command)
+    return run(settings)

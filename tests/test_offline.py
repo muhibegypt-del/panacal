@@ -85,12 +85,12 @@ class PictureModeTests(unittest.TestCase):
             return self.mode
 
     def test_reported_mode_is_used(self):
-        self.assertEqual(app.choose_picture_mode(self.LGStub("filmMaker"), {}, ask=lambda _p: self.fail()),
+        self.assertEqual(app.choose_picture_mode(self.LGStub("filmMaker"), {}, lambda _p: self.fail()),
                          "filmMaker")
 
     def test_unreported_mode_is_asked_not_guessed(self):
         answers = iter(["x", "0", "3"])
-        self.assertEqual(app.choose_picture_mode(self.LGStub(""), {}, ask=lambda _p: next(answers)), "cinema")
+        self.assertEqual(app.choose_picture_mode(self.LGStub(""), {}, lambda _p: next(answers)), "cinema")
 
 
 class MetricTests(unittest.TestCase):
@@ -368,6 +368,9 @@ class SimulationTests(unittest.TestCase):
         code, state, tv, console, _ = self.simulate(gpu_range="limited")
         self.assertEqual(code, 2)
         self.assertIn("Black is lifted", console)
+        self.assertIn("Nothing on the TV was changed", console)
+        # Checked before the TV is touched: no reset, no upload.
+        self.assertNotIn("picture_reset", tv.requests)
         self.assertEqual(tv.uploads, 0)
 
     def test_stale_session_is_closed_first(self):

@@ -27,50 +27,55 @@ def port_open(ip: str, port: int, timeout: float = 0.4) -> bool:
 def ssdp(timeout: float = 2.5) -> list[str]:
     found: list[str] = []
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-        sock.settimeout(0.3)
-        for target in SSDP_TARGETS:
-            message = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\n"
-                       f"MX: 2\r\nST: {target}\r\n\r\n").encode()
-            sock.sendto(message, ("239.255.255.250", 1900))
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                data, (ip, _port) = sock.recvfrom(4096)
-            except socket.timeout:
-                continue
-            text = data.decode("latin-1", errors="replace")
-            if re.search(r"webos|lge|LG", text) and ip not in found:
-                found.append(ip)
-        sock.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+            sock.settimeout(0.3)
+            for target in SSDP_TARGETS:
+                message = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\n"
+                           f"MX: 2\r\nST: {target}\r\n\r\n").encode()
+                sock.sendto(message, ("239.255.255.250", 1900))
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    data, (ip, _port) = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                if re.search(r"webos|lge|LG", data.decode("latin-1", errors="replace")) and ip not in found:
+                    found.append(ip)
     except OSError:
-        pass
+        pass            # multicast unavailable here: the subnet sweep still finds the TV
     return found
 
 
-def local_networks() -> list[ipaddress.IPv4Network]:
-    addresses = set()
-    try:
-        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        probe.connect(("192.0.2.1", 9))          # no packet is sent; picks the LAN interface
-        addresses.add(probe.getsockname()[0])
-        probe.close()
-    except OSError:
-        pass
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            addresses.add(info[4][0])
-    except OSError:
-        pass
-    networks = []
+def private_networks(addresses) -> list[ipaddress.IPv4Network]:
+    """The /24 home networks among this PC's IPv4 addresses."""
+    networks: list[ipaddress.IPv4Network] = []
     for address in addresses:
-        ip = ipaddress.IPv4Address(address)
+        try:
+            ip = ipaddress.IPv4Address(address)
+        except ValueError:
+            continue
         if ip.is_private and not ip.is_loopback and not ip.is_link_local:
             network = ipaddress.IPv4Network(f"{address}/24", strict=False)
             if network not in networks:
                 networks.append(network)
     return networks
+
+
+def local_networks() -> list[ipaddress.IPv4Network]:
+    addresses = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))      # no packet is sent; picks the LAN interface
+            addresses.add(probe.getsockname()[0])
+    except OSError:
+        pass            # no default route; the host name lookup below may still find one
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addresses.add(info[4][0])
+    except OSError:
+        pass            # no name resolution; use what the route lookup found
+    return private_networks(sorted(addresses))
 
 
 def sweep(networks) -> list[str]:
@@ -102,5 +107,8 @@ def discover(probe, known_ip: str = "", say=print) -> list[dict]:
     say("Looking for the LG TV on the network ...")
     confirm(ssdp())
     if not tvs:
-        confirm(sweep(local_networks()))
+        networks = local_networks()
+        if not networks:
+            say("This PC has no home-network (private) address, so the TV cannot be searched for.")
+        confirm(sweep(networks))
     return tvs

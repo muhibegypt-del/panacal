@@ -50,63 +50,127 @@ def xyz_from_xyy(x: float, y: float, Y: float) -> tuple[float, float, float]:
 
 
 class Reader:
+    """Draws one grey patch and reads it (the only I/O in this module)."""
+
     def __init__(self, pattern, meter, log, patch_size: int, settle_scale: float = 1.0):
         self.pattern, self.meter, self.log = pattern, meter, log
         self.area = window_area(patch_size)
         self.settle_scale = settle_scale
 
     def read(self, code: int, settle: float = 1.8, samples: int = 1) -> tuple[float, float, float]:
+        if samples < 1:
+            raise ValueError("samples must be at least 1")
         self.pattern.show(code, code, code, self.area)
         time.sleep(settle * self.settle_scale)
         values = [read_with_recovery(self.meter, self.log) for _ in range(samples)]
         return tuple(sum(v[i] for v in values) / samples for i in range(3))
 
 
-def wait_for_meter(reader: Reader, say, timeout: float = 900) -> dict:
+# --- pure decisions -----------------------------------------------------------
+
+MIN_WHITE = 10.0          # cd/m2: a meter on a lit patch reads far more
+STEADY = 0.03             # two white readings within 3%
+PATCH_DROP = 0.05         # black must read under 5% of white when the meter is on the patch
+LIFTED_BLACK = 0.0008     # black above this fraction of white is lifted
+LIMITED_SHADOW = 0.0017   # code 24 below this fraction of white: TV expects limited range
+
+
+def steady_white(previous: float | None, current: float) -> bool:
+    return previous is not None and current >= MIN_WHITE and abs(current - previous) <= STEADY * current
+
+
+def on_patch(white: float, black: float) -> bool:
+    """The reading follows the patch (room light would not drop)."""
+    return white > 0 and black <= PATCH_DROP * white
+
+
+def classify_range(black: float, shadow: float, white: float) -> str:
+    """'full', 'limited' or 'lifted' from black, full-code-24 and white.
+
+    Code 24 is 9.4% signal. A TV expecting full range shows it at 0.3-0.6%
+    of white; one expecting limited range (Black Level Low) sees 3.7% and
+    shows 0.04-0.07%. A lifted black means the GPU squeezes its output to
+    limited while the TV expects full range, which no pattern can undo."""
+    if white <= 0:
+        raise ValueError("white luminance must be positive")
+    if black > LIFTED_BLACK * white:
+        return "lifted"
+    return "limited" if shadow < LIMITED_SHADOW * white else "full"
+
+
+def verification_row(level: int, xyz, white: float, target_gamma: str, limited: bool) -> dict:
+    code = code_for_slot(level, limited)
+    target = xyz_from_xyy(*D65, white * target_yn(stimulus_for_code(code, limited), target_gamma))
+    record = xyz_record(xyz)
+    return {"level": level, "code": code, "Y": xyz[1], "target_Y": target[1], "x": record["x"],
+            "y": record["y"], "de": delta_e_itp(xyz, target)}
+
+
+def summarize(rows: list[dict]) -> dict:
+    if not rows:
+        raise ValueError("no verification readings")
+    des = [row["de"] for row in rows]
+    return {"rows": rows, "average_de": sum(des) / len(des), "max_de": max(des)}
+
+
+# --- measured steps -----------------------------------------------------------
+
+def wait_for_meter(reader: Reader, say, timeout: float = 900, clock=time.monotonic) -> dict:
     """Start as soon as the meter is on the patch: two steady bright
-    readings, then a black flash must drop the reading (room light would
-    not change with the patch)."""
+    readings, then a black flash must drop the reading."""
     say("Put the meter flat on the white patch in the middle of the TV. It starts by itself.")
-    deadline = time.monotonic() + timeout
+    started = clock()
+    next_hint = started + 45
     previous = None
-    while time.monotonic() < deadline:
+    warned_room_light = False
+    while clock() - started < timeout:
         Y = reader.read(255, settle=0.3)[1]
-        steady = previous is not None and Y >= 10 and abs(Y - previous) <= 0.03 * Y
+        ready = steady_white(previous, Y)
         previous = Y
-        if not steady:
-            continue
-        dark = reader.read(0, settle=1.0)[1]
-        if dark > 0.05 * Y:
+        if ready:
+            if on_patch(Y, reader.read(0, settle=1.0)[1]):
+                white = xyz_record(reader.read(255, settle=2.0, samples=2))
+                say(f"Meter found. Current white: {white['Y']:.1f} cd/m2  "
+                    f"x={white['x']:.4f} y={white['y']:.4f}")
+                return white
             previous = None
-            continue
-        white = xyz_record(reader.read(255, settle=2.0, samples=2))
-        say(f"Meter found. Current white: {white['Y']:.1f} cd/m2  x={white['x']:.4f} y={white['y']:.4f}")
-        return white
-    raise SystemExit("No meter reading from the patch within 15 minutes.")
+            if not warned_room_light:
+                warned_room_light = True
+                say("The meter sees light that does not come from the patch. Put it flat against the "
+                    "screen, centred on the white square.")
+        if clock() >= next_hint:
+            next_hint = clock() + 45
+            say(f"  Still waiting: the meter reads {Y:.2f} cd/m2 (needs a steady reading of at least "
+                f"{MIN_WHITE:.0f} from the white patch).")
+    raise SystemExit("No steady reading from the white patch within 15 minutes. Check the meter is "
+                     "plugged in and lying flat on the patch, then run again.")
+
+
+def measure_white(reader: Reader, say) -> dict:
+    """100% white with the meter already in place (after the TV changed)."""
+    white = xyz_record(reader.read(255, settle=2.0, samples=2))
+    if white["Y"] < MIN_WHITE:
+        raise SystemExit(f"White now reads only {white['Y']:.2f} cd/m2; the meter may have moved off the "
+                         "patch. Put it back on the white square and run again.")
+    say(f"White after the reset: {white['Y']:.1f} cd/m2  x={white['x']:.4f} y={white['y']:.4f}")
+    return white
 
 
 def detect_range(reader: Reader, white_y: float, say) -> bool:
-    """Return True when the TV expects limited range (16-235).
-
-    Full code 24 is 9.4% signal. A TV expecting full range shows it at
-    0.3-0.6% of white; a TV expecting limited range (Black Level Low) sees
-    3.7% and shows 0.04-0.07%. A lifted black instead means the GPU is
-    squeezing its output to limited while the TV expects full range, which
-    no pattern can undo."""
+    """Return True when the TV expects limited range (16-235)."""
     black = reader.read(0, settle=1.5, samples=2)[1]
     shadow = reader.read(24, settle=1.5, samples=2)[1]
-    reader.log(f"RANGE black={black:.4f} code24={shadow:.4f} white={white_y:.2f} "
-               f"ratio={shadow / white_y:.5f}")
-    if black > 0.0008 * white_y:
+    verdict = classify_range(black, shadow, white_y)
+    reader.log(f"RANGE black={black:.4f} code24={shadow:.4f} white={white_y:.2f} -> {verdict}")
+    if verdict == "lifted":
         raise SystemExit(
             f"Black is lifted ({black:.3f} cd/m2): the PC is sending limited-range video but the TV "
             "expects full range. Either set the GPU output to Full RGB (NVIDIA: Output dynamic range "
             "Full; AMD: Pixel Format RGB 4:4:4 PC Standard) or set the TV's Black Level to Low/Auto, "
             "then run again.")
-    limited = shadow / white_y < 0.0017
     say("The TV expects limited-range video (Black Level Low); patterns will use codes 16-235."
-        if limited else "The TV expects full-range video; patterns will use codes 0-255.")
-    return limited
+        if verdict == "limited" else "The TV expects full-range video; patterns will use codes 0-255.")
+    return verdict == "limited"
 
 
 VERIFY_LEVELS = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 5]
@@ -118,22 +182,15 @@ def verify(reader: Reader, target_gamma: str, limited: bool, say) -> dict:
     say("")
     say("Verifying the result (independent measurement of the final calibration) ...")
     rows = []
-    white = None
+    white = 0.0
     for level in VERIFY_LEVELS:
-        code = code_for_slot(level, limited)
-        xyz = reader.read(code, samples=2 if level <= 10 else 1)
-        if white is None:
-            white = xyz[1]
-        stimulus = stimulus_for_code(code, limited)
-        target = xyz_from_xyy(*D65, white * target_yn(stimulus, target_gamma))
-        record = xyz_record(xyz)
-        rows.append({"level": level, "Y": xyz[1], "target_Y": target[1], "x": record["x"],
-                     "y": record["y"], "de": delta_e_itp(xyz, target)})
+        xyz = reader.read(code_for_slot(level, limited), samples=2 if level <= 10 else 1)
+        white = white or xyz[1]
+        rows.append(verification_row(level, xyz, white, target_gamma, limited))
     say(f"{'Level':>6}  {'Y cd/m2':>9}  {'target':>9}  {'x':>7}  {'y':>7}  {'dE ITP':>6}")
     for row in rows:
         say(f"{row['level']:>5}%  {row['Y']:9.3f}  {row['target_Y']:9.3f}  {row['x']:7.4f}  "
             f"{row['y']:7.4f}  {row['de']:6.2f}")
-    des = [row["de"] for row in rows]
-    summary = {"rows": rows, "average_de": sum(des) / len(des), "max_de": max(des)}
+    summary = summarize(rows)
     say(f"Average dE ITP {summary['average_de']:.2f}, worst {summary['max_de']:.2f}")
     return summary

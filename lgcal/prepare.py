@@ -44,6 +44,7 @@ def panel_light(picture: dict) -> tuple[str, float] | None:
 def clear_calibration(lg, mode: str, say, sleep=time.sleep) -> None:
     """Steps 2 and 3: the TV's white balance and LUTs back to neutral."""
     zero = [0] * 26
+    say("  Clearing the TV's white balance and 1D LUT (up to a minute) ...")
     result = retry(lambda: lg.picture_settings_set({
         "settings": {"whiteBalanceMethod": "22", "whiteBalanceIre": "109", "ddc_layout": "sdr26",
                      "whiteBalanceRed": zero, "whiteBalanceGreen": zero, "whiteBalanceBlue": zero,
@@ -57,6 +58,7 @@ def clear_calibration(lg, mode: str, say, sleep=time.sleep) -> None:
         raise RuntimeError("The TV did not confirm the 1D LUT baseline reset.")
     if result.get("ddc_reset_verified") is not True:
         raise RuntimeError("The TV's 1D LUT readback did not verify the reset.")
+    say("  Clearing any leftover 3D LUT and colour matrix ...")
     result = retry(lambda: lg.sdr_calman_reset({"picture_mode": mode, "ddc_layout": "sdr26",
                                                 "helper_timeout": 170}), sleep=sleep)
     if result.get("status") != "ok":
@@ -71,7 +73,8 @@ def prepare(lg, mode: str, mode_name: str, say, sleep=time.sleep, factory_reset:
     before = lg.picture_settings({"keys": PANEL_KEYS, "picture_mode": mode})
     panel = panel_light(before.get("picture_settings") or {}) if before.get("status") == "ok" else None
     say(f"Resetting {mode_name} to factory first, as PGenerator does"
-        + (" (your OLED brightness is kept)." if panel else "."))
+        + (" (your OLED brightness is kept)." if panel else
+           ". The TV did not report its OLED brightness, so it will be at the factory value."))
     result = retry(lambda: lg.picture_reset({"picture_mode": mode, "signal_mode": "sdr",
                                              "require_white_balance_reset": True}), sleep=sleep)
     if result.get("status") != "ok":
