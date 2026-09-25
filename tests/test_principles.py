@@ -307,6 +307,35 @@ class Errors(unittest.TestCase):
                 setup.download("https://example/tool.zip", target, lambda _m: None)
         self.assertEqual(list(self.dir.iterdir()), [])
 
+    def fake_strawberry(self, with_c_bin: bool) -> Path:
+        """A Strawberry-shaped folder whose perl only loads SSL when c/bin
+        (libssl/libcrypto) is on PATH, like the real portable edition."""
+        root = self.dir / ("sp" if with_c_bin else "sp-broken")
+        (root / "perl" / "bin").mkdir(parents=True)
+        if with_c_bin:
+            (root / "c" / "bin").mkdir(parents=True)
+        perl = root / "perl" / "bin" / "perl"
+        perl.write_text("#!/bin/sh\n"
+                        f'case ":$PATH:" in *":{root}/c/bin:"*) printf MSWin32 ;;\n'
+                        "*) echo \"Can't load 'SSLeay.xs.dll' for module Net::SSLeay: load_file:"
+                        "The specified module could not be found\" >&2; exit 2 ;;\nesac\n")
+        perl.chmod(0o755)
+        return perl
+
+    @unittest.skipIf(os.name == "nt", "uses a shell script as a stand-in perl")
+    def test_portable_perl_gets_its_ssl_libraries_on_path(self):
+        perl = self.fake_strawberry(with_c_bin=True)
+        self.assertEqual(setup.perl_problem(str(perl)), "")
+        env = setup.perl_runtime_env(str(perl), {"PATH": "/usr/bin"})
+        self.assertTrue(env["PATH"].split(os.pathsep)[2].endswith(os.path.join("c", "bin")))
+        self.assertTrue(env["PATH"].endswith("/usr/bin"))
+        self.assertEqual(setup.perl_runtime_env("/usr/bin/perl", {"PATH": "/usr/bin"}), {"PATH": "/usr/bin"})
+
+    @unittest.skipIf(os.name == "nt", "uses a shell script as a stand-in perl")
+    def test_perl_failure_shows_perls_own_message(self):
+        problem = setup.perl_problem(str(self.fake_strawberry(with_c_bin=False)))
+        self.assertIn("Can't load 'SSLeay.xs.dll'", problem)
+
     def test_explicit_perl_that_does_not_work_is_reported_not_replaced(self):
         with self.assertRaisesRegex(SystemExit, "settings.json"):
             setup.find_perl({"perl": str(self.dir / "perl.exe")}, lambda _m: None)

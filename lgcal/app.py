@@ -26,7 +26,7 @@ from .meter import Meter
 from .patterns import PatternWindow
 from .prepare import clear_calibration, prepare
 from .server import Api, MeterService, make_server
-from .setup import find_argyll, find_ccss, find_perl, meter_command
+from .setup import find_argyll, find_ccss, find_perl, meter_command, perl_runtime_env
 from .signal import Reader, detect_range, measure_white, verify, wait_for_meter
 from .steps import PICTURE_MODES, build_config
 
@@ -156,9 +156,11 @@ def load_settings(path: Path = SETTINGS) -> dict:
     return settings
 
 
-def perl_env(session_dir: Path | None, port: int | None, helper: Path = HELPER) -> dict:
-    """Environment for the worker and helper (see PATCHES.md)."""
+def perl_env(session_dir: Path | None, port: int | None, helper: Path = HELPER, perl: str = "") -> dict:
+    """Environment for the worker and helper (see PATCHES.md), including
+    the PATH that Strawberry Perl needs for its SSL libraries."""
     env = {
+        **(perl_runtime_env(perl) if perl else {}),
         "PGEN_LG_HELPER": helper.as_posix(),
         "PGEN_LG_DATA_DIR": DATA_DIR.as_posix(),
         "PGEN_LG_NATIVE_TLS": "1",
@@ -325,7 +327,7 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
     log = session.log
     perl = perl or find_perl(settings, say)
     port = free_port(int(settings.get("api_port") or 8765))
-    env = {**perl_env(session.directory, port, helper), **(extra_env or {})}
+    env = {**perl_env(session.directory, port, helper, perl), **(extra_env or {})}
     lg = LG(perl, helper, DATA_DIR, log, env)
     owned = []
     server = None
@@ -574,7 +576,7 @@ def pair_or_undo(settings: dict, command: str) -> int:
     with Session(suffix="_" + command) as session:
         try:
             perl = find_perl(settings, say)
-            lg = LG(perl, HELPER, DATA_DIR, session.log, perl_env(None, None))
+            lg = LG(perl, HELPER, DATA_DIR, session.log, perl_env(None, None, HELPER, perl))
             find_tv(lg, settings)
             if command == "undo":
                 lg.clear_stale_calibration_mode()

@@ -87,6 +87,23 @@ def extract(archive: Path, target: Path, say) -> None:
 
 # --- Perl -------------------------------------------------------------------
 
+def perl_runtime_env(perl: str, base: dict | None = None) -> dict:
+    """PATH and variables a Perl needs, as Strawberry's portableshell.bat
+    sets them: <root>/perl/site/bin, <root>/perl/bin and <root>/c/bin first on
+    PATH (c/bin holds libssl/libcrypto, without which Net::SSLeay cannot load),
+    and the user's PERL5OPT and friends cleared so they cannot interfere.
+    Other Perls get PATH unchanged."""
+    base = dict(os.environ if base is None else base)
+    env = {"PATH": base.get("PATH", "")}
+    root = Path(perl).resolve().parent.parent.parent       # <root>/perl/bin/perl.exe
+    if (root / "c" / "bin").is_dir() and (root / "perl" / "bin").is_dir():
+        prefix = [str(root / "perl" / "site" / "bin"), str(root / "perl" / "bin"), str(root / "c" / "bin")]
+        env["PATH"] = os.pathsep.join(prefix + ([env["PATH"]] if env["PATH"] else []))
+        env.update({key: "" for key in ("PERL5OPT", "PERL_JSON_BACKEND", "PERL_YAML_BACKEND",
+                                        "PERL_MM_OPT", "PERL_MB_OPT")})
+    return env
+
+
 def perl_problem(perl: str) -> str:
     """Why this Perl cannot run the helper, or "" if it can: it must be a
     native Windows Perl (not Git's msys Perl) with IO::Socket::SSL, JSON::PP
@@ -94,12 +111,16 @@ def perl_problem(perl: str) -> str:
     try:
         check = subprocess.run(
             [perl, "-MIO::Socket::SSL", "-MJSON::PP", "-MDigest::SHA", "-e", "print $^O"],
-            capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW)
+            capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW,
+            env={**os.environ, **perl_runtime_env(perl), "PERL5LIB": ""})
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"does not start ({exc})"
     if check.returncode != 0:
         missing = re.search(r"Can't locate (\S+)", check.stderr or "")
-        return f"lacks {missing.group(1)}" if missing else "cannot load its SSL/JSON modules"
+        if missing:
+            return f"lacks {missing.group(1)}"
+        first = next((line.strip() for line in (check.stderr or "").splitlines() if line.strip()), "")
+        return "cannot load its SSL/JSON modules" + (f" ({first[:300]})" if first else "")
     if check.stdout.strip() not in ("MSWin32", "linux", "darwin"):
         return f"is a {check.stdout.strip() or 'non-native'} Perl, not native Windows Perl"
     return ""
