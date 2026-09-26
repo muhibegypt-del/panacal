@@ -28,7 +28,8 @@ from .prepare import clear_calibration, prepare
 from .server import Api, MeterService, make_server
 from .setup import find_argyll, find_ccss, find_perl, meter_command, perl_runtime_env
 from .signal import Reader, detect_range, measure_white, verify, wait_for_meter
-from .steps import PICTURE_MODES, build_config
+from .dark import extend_dark_end
+from .steps import METER_FLOOR, PICTURE_MODES, build_config
 
 ROOT = Path(__file__).resolve().parents[1]
 PGEN = ROOT / "pgen"
@@ -377,12 +378,30 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
                 say("After the reset the TV expects " + ("limited" if limited else "full") +
                     "-range video; patterns follow it.")
         config = build_config(settings, white["Y"], limited=limited, picture_mode=picture_mode)
+        meter_floor = float((settings.get("meter") or {}).get("floor_cd_m2", METER_FLOOR))
+        threshold = config.get("lg_autocal_sdr26_dpg_low_ire_threshold")
+        dark_end = None
+        if threshold:
+            say(f"Levels below {threshold:g}% are dimmer than {meter_floor:g} cd/m2, too dark for the meter to "
+                "steer; they follow the curve calibrated above them.")
+
+            def dark_end(table):
+                try:
+                    extended, info = extend_dark_end(table, threshold, limited)
+                except ValueError as exc:
+                    log(f"DARK END not extended: {exc}")
+                    return table
+                log(f"DARK END extended below index {info['from_index']} from {info['fit_slots']} "
+                    f"(exponents R/G/B {info['exponents']})")
+                (session.directory / "dark_end.json").write_text(
+                    json.dumps({**info, "worker_table": table, "committed_table": extended}), encoding="utf-8")
+                return extended
         config.update(config_overrides or {})
 
         meter_settings = settings.get("meter") or {}
         service = MeterService(pattern, meter, log, bool(meter_settings.get("synthetic_black", True)))
         service.delay_scale = delay_scale
-        server = make_server(Api(service, lg, log), port)
+        server = make_server(Api(service, lg, log, final_dpg=dark_end), port)
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
         state_file = session.directory / "worker_state.json"
@@ -410,7 +429,7 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
         ok = report(final, session.directory / "worker.log")
         if ok:
             tv_state[0] = "calibrated"
-            result = verify(reader, config["target_gamma"], limited, say)
+            result = verify(reader, config["target_gamma"], limited, say, meter_floor)
             (session.directory / "verification.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
         return 0 if ok else 1
     finally:

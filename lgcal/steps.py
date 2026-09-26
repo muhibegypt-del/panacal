@@ -18,6 +18,12 @@ SEND_ORDER = [0, 50, 25, 75, 95, 90, 85, 80, 70, 65, 60, 55, 45, 40, 35, 30,
               20, 15, 10, 7, 5, 4, 3, 2.3]
 INPUT_MAX = 255
 TARGET_GAMMAS = ("bt1886", "2.2", "2.4", "srgb")
+# The worker's own ladder below 10% (meter_lg_autocal.pl @sdr26_labels).
+WORKER_DARK_SLOTS = (2.3, 3, 4, 5, 7, 10)
+# Dimmest patch the meter is trusted to steer the LUT. A Spyder5 tracked
+# the TV at 0.35 cd/m2 but not at 0.16 (its readings fell while the TV was
+# driven brighter), so anything dimmer is left to the curve measured above.
+METER_FLOOR = 0.3
 PICTURE_MODES = ("expert1", "expert2", "cinema", "filmMaker", "game", "normal",
                  "eco", "sports", "vivid", "personalized")
 
@@ -89,6 +95,34 @@ def build_steps(target_gamma: str, limited: bool = False) -> list[dict]:
     black.update(autocal_slot_locked=False, autocal_read_only=True)
     by_slot[0] = black
     return [white] + [by_slot[slot] for slot in SEND_ORDER]
+
+
+def slot_luminance(slot: float, white: float, target_gamma: str, limited: bool = False) -> float:
+    """Target cd/m2 of a ladder slot, as the worker computes it."""
+    return white * target_yn(stimulus_for_code(code_for_slot(slot, limited), limited), target_gamma)
+
+
+def dark_threshold(white: float, target_gamma: str, limited: bool = False, floor: float = METER_FLOOR) -> float:
+    """Lowest worker slot whose target is bright enough for the meter.
+
+    Slots below it become the worker's "low" tier. The worker caps the
+    threshold at 10%, so 10% is always calibrated."""
+    for slot in WORKER_DARK_SLOTS:
+        if slot_luminance(slot, white, target_gamma, limited) >= floor:
+            return float(slot)
+    return float(WORKER_DARK_SLOTS[-1])
+
+
+def dark_overrides(white: float, target_gamma: str, limited: bool = False, floor: float = METER_FLOOR) -> dict:
+    """Worker settings that stop it chasing unreadable dark patches.
+
+    Low-tier anchors get one iteration: the worker reads once, and its
+    final-state restore puts back the value seeded from the calibrated
+    curve above (the solver's move from that reading is discarded)."""
+    threshold = dark_threshold(white, target_gamma, limited, floor)
+    if threshold <= WORKER_DARK_SLOTS[0]:
+        return {}
+    return {"lg_autocal_sdr26_dpg_low_ire_threshold": threshold, "lg_autocal_sdr26_dpg_inner_iters_low": 1}
 
 
 def build_config(settings: dict, white_luminance: float | None = None, *, limited: bool = False,
@@ -175,4 +209,5 @@ def build_config(settings: dict, white_luminance: float | None = None, *, limite
         "signal_mode": "sdr",
         "max_luma": 1000,
         "steps": build_steps(gamma, limited),
+        **dark_overrides(white_y, gamma, limited, float(meter.get("floor_cd_m2", METER_FLOOR))),
     }

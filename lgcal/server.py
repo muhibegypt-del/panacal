@@ -124,10 +124,19 @@ class MeterService:
 
 
 class Api:
-    def __init__(self, meter_service: MeterService, lg, log):
+    def __init__(self, meter_service: MeterService, lg, log, final_dpg=None):
+        """final_dpg(table) -> table rewrites the LUT on the worker's
+        final commit only (see lgcal.dark)."""
         self.meter = meter_service
         self.lg = lg
         self.log = log
+        self.final_dpg = final_dpg
+
+    def dpg_upload(self, payload: dict) -> dict:
+        from .dark import is_final_commit
+        if self.final_dpg is not None and is_final_commit(payload) and isinstance(payload.get("dpg_data"), list):
+            payload = {**payload, "dpg_data": self.final_dpg(payload["dpg_data"])}
+        return self.lg.dpg_upload(payload)
 
     def handle(self, method: str, path: str, payload: dict) -> dict:
         path = path.split("?", 1)[0]
@@ -141,7 +150,7 @@ class Api:
             ("POST", "/api/lg/picture-settings"): self.lg.picture_settings,
             ("GET", "/api/lg/picture-settings"): self.lg.picture_settings,
             ("POST", "/api/lg/picture-settings/set"): self.lg.picture_settings_set,
-            ("POST", "/api/lg/1d-dpg/upload"): self.lg.dpg_upload,
+            ("POST", "/api/lg/1d-dpg/upload"): self.dpg_upload,
             ("POST", "/api/lg/3d-lut/reset"): self.lg.lut3d_reset,
         }
         handler = routes.get((method, path))

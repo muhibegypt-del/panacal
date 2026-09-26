@@ -107,9 +107,13 @@ def verification_row(level: int, xyz, white: float, target_gamma: str, limited: 
 
 
 def summarize(rows: list[dict]) -> dict:
+    """Average and worst dE over the rows the meter can read reliably
+    (rows flagged below_floor are reported but not scored)."""
     if not rows:
         raise ValueError("no verification readings")
-    des = [row["de"] for row in rows]
+    des = [row["de"] for row in rows if not row.get("below_floor")]
+    if not des:
+        raise ValueError("every verification reading is below the meter floor")
     return {"rows": rows, "average_de": sum(des) / len(des), "max_de": max(des)}
 
 
@@ -176,9 +180,10 @@ def detect_range(reader: Reader, white_y: float, say) -> bool:
 VERIFY_LEVELS = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 5]
 
 
-def verify(reader: Reader, target_gamma: str, limited: bool, say) -> dict:
+def verify(reader: Reader, target_gamma: str, limited: bool, say, floor: float = 0.0) -> dict:
     """Measure the committed calibration against the same targets and the
-    same dE ITP the worker uses (white = this measured 100%)."""
+    same dE ITP the worker uses (white = this measured 100%). Levels whose
+    target is dimmer than the meter floor are shown but not scored."""
     say("")
     say("Verifying the result (independent measurement of the final calibration) ...")
     rows = []
@@ -186,11 +191,16 @@ def verify(reader: Reader, target_gamma: str, limited: bool, say) -> dict:
     for level in VERIFY_LEVELS:
         xyz = reader.read(code_for_slot(level, limited), samples=2 if level <= 10 else 1)
         white = white or xyz[1]
-        rows.append(verification_row(level, xyz, white, target_gamma, limited))
+        row = verification_row(level, xyz, white, target_gamma, limited)
+        row["below_floor"] = row["target_Y"] < floor
+        rows.append(row)
     say(f"{'Level':>6}  {'Y cd/m2':>9}  {'target':>9}  {'x':>7}  {'y':>7}  {'dE ITP':>6}")
     for row in rows:
         say(f"{row['level']:>5}%  {row['Y']:9.3f}  {row['target_Y']:9.3f}  {row['x']:7.4f}  "
-            f"{row['y']:7.4f}  {row['de']:6.2f}")
+            f"{row['y']:7.4f}  {row['de']:6.2f}{'  *' if row['below_floor'] else ''}")
     summary = summarize(rows)
     say(f"Average dE ITP {summary['average_de']:.2f}, worst {summary['max_de']:.2f}")
+    if any(row["below_floor"] for row in rows):
+        say(f"* Dimmer than {floor:g} cd/m2, where the meter is not reliable: shown for reference, "
+            "not counted.")
     return summary

@@ -16,7 +16,8 @@ from .steps import PICTURE_MODES, TARGET_GAMMAS
 DEFAULTS = {"target_gamma": "bt1886", "target_delta_e": 0.5, "patch_size": 10, "api_port": 8765,
             "reset_picture_mode": True, "picture_mode": "", "tv_ip": "", "perl": "", "argyll_bin": "",
             "pattern_insertion": True, "meter": {}}
-METER_DEFAULTS = {"ccss": "", "spotread": "", "args": ["-e"], "display_type": "oled", "synthetic_black": True}
+METER_DEFAULTS = {"ccss": "", "spotread": "", "args": ["-e"], "display_type": "oled", "synthetic_black": True,
+                  "floor_cd_m2": 0.3}
 IGNORED = {"_comment"}
 
 
@@ -107,6 +108,7 @@ def validate(raw) -> tuple[dict, list[str]]:
     if not isinstance(meter["display_type"], str) or not meter["display_type"]:
         errors.append("meter.display_type must be a non-empty string")
     meter["synthetic_black"] = _bool(meter["synthetic_black"], "meter.synthetic_black", errors)
+    meter["floor_cd_m2"] = _number(meter["floor_cd_m2"], "meter.floor_cd_m2", 0, 5, errors)
     out["meter"] = meter
 
     if errors:

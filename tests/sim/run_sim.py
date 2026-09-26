@@ -42,7 +42,7 @@ FAST = {
 
 def simulate(session_dir: Path, settings: dict | None = None, *, black_level: str = "high",
              gpu_range: str = "full", tv_mode: str = "expert2", stale_calibration: bool = False,
-             reset: bool = True):
+             reset: bool = True, peak: float = 150.0, meter_class=None):
     """Returns (exit code, worker state, SimTV, SimMeter, console text)."""
     data_dir = Path(tempfile.mkdtemp(prefix="lgcal-sim-data-"))
     saved_data_dir = app.DATA_DIR
@@ -51,13 +51,13 @@ def simulate(session_dir: Path, settings: dict | None = None, *, black_level: st
         "ip": "192.0.2.10", "manual_ip": "192.0.2.10", "client_key": "sim-key",
         "model_name": SimTV.MODEL["model_name"], "calibration_mode": stale_calibration,
         "calibration_picture_mode": tv_mode if stale_calibration else ""}), encoding="utf-8")
-    panel = Panel(black_level=black_level, gpu_range=gpu_range)
+    panel = Panel(peak=peak, black_level=black_level, gpu_range=gpu_range)
     tv = SimTV(panel, leftover_calibration=reset)
     tv.picture_mode = tv_mode
     tv.calibration_mode = stale_calibration
     server = serve(tv)
     pattern = SimPattern()
-    meter = SimMeter(panel, pattern)
+    meter = (meter_class or SimMeter)(panel, pattern)
     settings = {**app.DEFAULTS, "api_port": 18765, **(settings or {})}
     console = io.StringIO()
     try:

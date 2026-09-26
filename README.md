@@ -21,7 +21,8 @@ There is nothing to configure. Everything that could stop the run (tools, TV, di
 | Meter | Uses a WOLED `.ccss` correction if one is installed (ArgyllCMS, DisplayCAL or the `ccss` folder). It notices the meter on the patch by flashing the patch to black. |
 | Video range | Measures whether the TV expects full or limited range and draws patterns to match, so the TV's Black Level setting can stay as it is. If the PC sends limited range to a TV set to full, black is lifted; it stops before changing anything and says which setting to change. |
 | Calibrate | Runs the author's worker: 100% white, then 50%, 25%, 75% and 95% down to 2.3%, uploading a corrected 1D LUT until each level is within dE ITP 0.5. It then commits the LUT and closes calibration mode. |
-| Verify | Measures 100% down to 5% again on the finished calibration and prints dE ITP per level, using the author's formula. The numbers are a fresh measurement, not the solver's own. |
+| Dark levels | A Spyder5 stops tracking the TV at about 0.3 cd/m² (7% on a 200 cd/m² white). Levels dimmer than that are not steered by the meter: the worker takes one look and moves on, and the committed LUT carries the curve calibrated at the next four levels down to black. The session's `dark_end.json` has the worker's table and the committed one. |
+| Verify | Measures 100% down to 5% again on the finished calibration and prints dE ITP per level, using the author's formula. The numbers are a fresh measurement, not the solver's own. Levels dimmer than the meter floor are marked `*` and left out of the average. |
 
 Ctrl+C stops safely. The worker finishes its current write and closes calibration mode.
 
@@ -43,6 +44,7 @@ Copy `settings.example.json` to `settings.json` only to change a default. The fi
 | `tv_ip` | found automatically | For networks where discovery is blocked. |
 | `patch_size` | `10` | Patch window as a percentage of screen area. |
 | `meter.ccss` | found automatically | A specific correction file. |
+| `meter.floor_cd_m2` | `0.3` | Dimmest level the meter is trusted to steer. Lower it for an i1Display Pro (about `0.01`); `0` lets the worker calibrate every level. |
 | `reset_picture_mode` | `true` | `false` keeps your other picture settings; the white balance and LUTs are still cleared first. |
 
 ## Scope

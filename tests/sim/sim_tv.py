@@ -130,6 +130,21 @@ class SimMeter:
         pass
 
 
+class DarkBlindMeter(SimMeter):
+    """A Spyder5 in near-black: below about 0.25 cd/m2 its luminance stops
+    following the patch (on the G2 it fell from 0.146 to 0.107 while the
+    TV was driven several times brighter)."""
+
+    BLIND_BELOW = 0.25
+
+    def read(self) -> tuple[float, float, float]:
+        X, Y, Z = super().read()
+        if Y >= self.BLIND_BELOW:
+            return X, Y, Z
+        wrong = self.random.uniform(0.08, 0.16) / Y
+        return X * wrong * (1 + self.random.gauss(0, 0.02)), Y * wrong, Z * wrong * (1 + self.random.gauss(0, 0.02))
+
+
 class SimTV:
     """Answers pgenerator-lg requests (via stub_helper.pl) like an LG C-series."""
 
