@@ -145,9 +145,11 @@ class PureDecisions(unittest.TestCase):
 
         directory = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, directory, True)
-        with mock.patch("urllib.request.urlopen", return_value=Response(body)):
+        with mock.patch("urllib.request.urlopen", return_value=Response(body)) as opened:
             setup.download("https://x/a.zip", directory / "a.zip", lambda _m: None, {"0000", good.upper()})
         self.assertEqual((directory / "a.zip").read_bytes(), body)
+        # madshi.net answers 403 to Python's default user agent.
+        self.assertTrue(opened.call_args[0][0].get_header("User-agent").startswith("Mozilla/5.0"))
         with mock.patch("urllib.request.urlopen", return_value=Response(body)):
             with self.assertRaisesRegex(SystemExit, "damaged"):
                 setup.download("https://x/b.zip", directory / "b.zip", lambda _m: None, {"0000"})

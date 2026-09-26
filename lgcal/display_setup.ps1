@@ -14,7 +14,7 @@ function Get-Outputs {
         [pscustomobject]@{
             gdi = $_.Gdi; name = $_.Name
             primary = ($_.X -eq 0 -and $_.Y -eq 0)
-            width = $_.Width; height = $_.Height
+            x = $_.X; y = $_.Y; width = $_.Width; height = $_.Height
             hdr_supported = $_.HdrSupported; hdr_on = $_.HdrOn; bits = $_.Bits
             adapter_low = $_.AdapterLow; adapter_high = $_.AdapterHigh; target = $_.TargetId
         }
@@ -86,7 +86,7 @@ try {
     }
     $state = [ordered]@{
         device = $tv.gdi; name = $tv.name; primary = $tv.primary
-        width = $tv.width; height = $tv.height; bits = $tv.bits; hdr_on = $tv.hdr_on
+        x = $tv.x; y = $tv.y; width = $tv.width; height = $tv.height; bits = $tv.bits; hdr_on = $tv.hdr_on
         adapter_low = $tv.adapter_low; adapter_high = $tv.adapter_high; target = $tv.target
         topology_before = $topology; topology_changed = $topologyChanged; hdr_changed = $hdrChanged
         night_light = $nightLight

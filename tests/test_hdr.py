@@ -12,7 +12,8 @@ from lgcal import app
 from lgcal.hdr import (HDR_CODES_10BIT_FULL, HDR_PICTURE_MODES, HDR_SLOTS, build_hdr_colour_config,
                        build_hdr_greyscale_config, colour_patches, hdr_dark_threshold, hdr_index, hdr_steps,
                        pq_decode, pq_encode)
-from lgcal.madtpg import MadTPGPatterns, wait_for_hdr
+from lgcal import madtpg
+from lgcal.madtpg import HDR_METADATA, MadTPGPatterns, find_madvr, wait_for_hdr
 
 
 class Bodies(unittest.TestCase):
@@ -65,7 +66,7 @@ class Bodies(unittest.TestCase):
 
 class FakeMadHcNet:
     def __init__(self, connects=True, shows=True):
-        self.calls, self.connects, self.shows = [], connects, shows
+        self.calls, self.connects, self.shows, self.refuse = [], connects, shows, set()
 
     def connect(self, timeout_ms):
         self.calls.append(("connect", timeout_ms))
@@ -77,7 +78,7 @@ class FakeMadHcNet:
     def __getattr__(self, name):
         def call(*args):
             self.calls.append((name, *args))
-            return self.shows if name == "ShowRGB" else True
+            return self.shows if name == "ShowRGB" else name not in self.refuse
         return call
 
 
@@ -101,6 +102,57 @@ class MadTPG(unittest.TestCase):
         tpg = MadTPGPatterns(Path("."), lambda _m: None, api=FakeMadHcNet(shows=False), launch=False)
         with self.assertRaises(RuntimeError):
             tpg.show(1, 1, 1, 0.1)
+
+    def test_window_goes_fullscreen_on_the_tv_and_hdr_is_pressed(self):
+        api = FakeMadHcNet()
+        tpg = MadTPGPatterns(Path("."), lambda _m: None, api=api, launch=False, sleep=lambda _s: None)
+        self.assertTrue(tpg.to_screen({"device": r"\\.\DISPLAY2", "x": 1920, "y": 0, "width": 3840,
+                                       "height": 2160}))
+        self.assertIn(("place", 1920 + 960, 540, 1920 + 2880, 1620), api.calls)
+        self.assertLess(api.calls.index(("place", 2880, 540, 4800, 1620)), api.calls.index(("EnterFullscreen",)))
+        self.assertTrue(tpg.hdr_on())
+        self.assertEqual(api.calls[-3:], [("SetHdrMetadata", *HDR_METADATA), ("SetHdrButton", True),
+                                          ("IsHdrButtonPressed",)])
+        self.assertFalse(tpg.to_screen({"device": ""}))          # display setup failed: user drags it
+
+    def test_refusals_fall_back_to_asking(self):
+        api = FakeMadHcNet()
+        api.refuse = {"IsFullscreen", "IsHdrButtonPressed"}
+        tpg = MadTPGPatterns(Path("."), lambda _m: None, api=api, launch=False, sleep=lambda _s: None)
+        self.assertFalse(tpg.to_screen({"x": 0, "y": 0, "width": 1920, "height": 1080}))
+        self.assertFalse(tpg.hdr_on())
+
+    def test_finds_madtpg_inside_the_zips_folder(self):
+        tools = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tools, True)
+        inner = tools / "madVR" / "madVR"
+        inner.mkdir(parents=True)
+        for name in ("madTPG.exe", "madHcNet64.dll"):
+            (inner / name).write_bytes(b"")
+        saved = madtpg.TOOLS, madtpg.registered_madvr
+        madtpg.TOOLS, madtpg.registered_madvr = tools, lambda: None
+        self.addCleanup(lambda: setattr(madtpg, "TOOLS", saved[0]) or setattr(madtpg, "registered_madvr", saved[1]))
+        self.assertEqual(find_madvr({}, self.fail), inner)      # no second download
+
+    def test_wait_for_hdr_only_asks_what_madtpg_could_not_do(self):
+        class LG:
+            def current_picture_mode(self):
+                return "hdrCinema"
+        said = []
+        self.assertEqual(wait_for_hdr(LG(), said.append, HDR_PICTURE_MODES, on_screen=True, hdr=True), "hdrCinema")
+        self.assertEqual(said, [])
+
+        class Later:
+            modes = ["expert2", "hdrFilmMaker"]
+
+            def current_picture_mode(self):
+                return self.modes.pop(0)
+        wait_for_hdr(Later(), said.append, HDR_PICTURE_MODES, on_screen=True, hdr=True, sleep=lambda _s: None)
+        text = "\n".join(said)
+        self.assertIn("sending HDR10", text)
+        self.assertNotIn("Drag", text)
+        self.assertNotIn("'HDR' button", text)
+        self.assertIn("Dynamic Tone Mapping", text)
 
     def test_wait_for_hdr(self):
         class LG:

@@ -521,7 +521,7 @@ def _run_hdr(session: Session, settings: dict, tv_state: list, *, pattern, meter
         if lg.clear_stale_calibration_mode() is not None:
             say("Closed a calibration session left open by an earlier run.")
         if pattern is None:
-            prepare_display(session, owned)
+            display = prepare_display(session, owned)
             folder = find_madvr(settings, say)
             say("Starting madTPG (madVR's test pattern generator) ...")
             pattern = MadTPGPatterns(folder, log)
@@ -530,7 +530,12 @@ def _run_hdr(session: Session, settings: dict, tv_state: list, *, pattern, meter
                 pattern.api.SetDeviceGammaRamp(None)       # linear GPU ramp for the run
             except Exception as exc:  # older madHcNet: dispwin is not used for HDR
                 log(f"madTPG gamma ramp not reset: {exc!r}")
-        picture_mode = wait_for_hdr(lg, say, HDR_PICTURE_MODES, sleep=sleep)
+            on_screen = pattern.to_screen(display)
+            hdr_pressed = pattern.hdr_on()
+        else:
+            on_screen = hdr_pressed = True
+        picture_mode = wait_for_hdr(lg, say, HDR_PICTURE_MODES, sleep=sleep, on_screen=on_screen,
+                                    hdr=hdr_pressed)
         say(f"Calibrating the HDR picture mode the TV is in: {HDR_MODE_NAMES.get(picture_mode, picture_mode)}")
         if meter is None:
             meter = open_meter(settings, lg, log, owned)

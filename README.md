@@ -35,7 +35,7 @@ Whenever a run stops, the last lines say why, what state the TV was left in (unt
 
 | Step | What it does |
 |---|---|
-| Patterns | A Windows window cannot send HDR10, so patterns come from madTPG, madVR's free test pattern generator (the one DisplayCAL, HCFR and Calman use). It is downloaded into `tools\madVR` the first time. madTPG's HDR mode is a button in its window: the run asks for one click and continues when the TV reports an HDR picture mode. |
+| Patterns | A Windows window cannot send HDR10, so patterns come from madTPG, madVR's free test pattern generator (the one DisplayCAL, HCFR and Calman use). It is downloaded into `tools\madVR` the first time. The run puts the madTPG window fullscreen on the TV and turns its HDR mode on (BT.2020, D65, 1000-nit metadata) through madTPG's own API; you only pick the TV's HDR picture mode (Cinema, Cinema Home or Filmmaker) with Dynamic Tone Mapping off, and it continues by itself. If madTPG refuses either step, the run asks you to do it by hand. |
 | Reset | The HDR reference reset: identity 1D LUT, BT.2020 3D LUT and matrix, factory tone map. |
 | Greyscale | The worker's HDR path: 20 levels from 100% down to 1.4%, each on a 2.2 curve against the measured peak while the TV is held in LG's calibration pass-through. Levels dimmer than the meter floor on that curve (with a Spyder5 on a ~700 cd/m2 G2: below 4%) follow the curve calibrated above them. |
 | Colour and tone map | The colour worker's HDR matrix run inherits that calibration session, uploads the BT.2020 3D LUT, then LG's tone map for the measured peak together with the greyscale table, and ends calibration mode. |

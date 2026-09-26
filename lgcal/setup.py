@@ -42,6 +42,9 @@ def progress_step(done: int, total: int) -> int:
     return done * 10 // total if total > 0 else done // (10 << 20)
 
 
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LGAutoCal"
+
+
 def download(url: str, target: Path, say, sha256=()) -> None:
     """Download to target.part, check the SHA-256 when given (one value or
     several accepted values), then rename. A failed or interrupted download
@@ -51,7 +54,9 @@ def download(url: str, target: Path, say, sha256=()) -> None:
     partial = target.with_suffix(target.suffix + ".part")
     digest = hashlib.sha256()
     try:
-        with urllib.request.urlopen(url, timeout=60) as response, partial.open("wb") as out:
+        # Some hosts (madshi.net) refuse Python's default user agent.
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as out:
             total = int(response.headers.get("Content-Length") or 0)
             done, shown = 0, 0
             while chunk := response.read(1 << 20):
