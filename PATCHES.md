@@ -4,7 +4,8 @@
 
 | This repo | Upstream |
 |---|---|
-| `pgen/bin/meter_lg_autocal.pl` | `usr/bin/meter_lg_autocal.pl` (the AutoCal worker) |
+| `pgen/bin/meter_lg_autocal.pl` | `usr/bin/meter_lg_autocal.pl` (the greyscale AutoCal worker) |
+| `pgen/bin/meter_lg_3d_autocal.pl` | `usr/bin/meter_lg_3d_autocal.pl` (the colour / 3D LUT AutoCal worker, imported unmodified in `ca3cfef`) |
 | `pgen/bin/pgenerator-lg` | `usr/sbin/pgenerator-lg` (the LG webOS helper) |
 | `pgen/share/PGenerator/PGMath.pm`, `PGCalibrationMath.pm`, `PGMeterReading.pm`, `PGSignalCode.pm` | `usr/share/PGenerator/` |
 
@@ -20,6 +21,14 @@ The calibration logic is the author's: targets, the solver, the 1D LUT build, th
 | `lg_helper_json` | When `PGEN_LG_HELPER` is set, run `"$^X" "<helper>"` with the request in `%ENV` | The original runs `timeout Ns env VAR=… /usr/sbin/pgenerator-lg` through `sh`. Windows has no `timeout`, `env` or `sh`. The helper's own socket timeouts still apply. |
 | `lg_clients` | `PGEN_LG_DATA_DIR` | Location of the paired-TV store (`clients.json`). |
 | `autocal_ddc_reset_diag_log` | `PGEN_LG_DATA_DIR` | Location of `last-write.log`. |
+
+## Colour worker (`meter_lg_3d_autocal.pl`)
+
+| Line | Change | Why |
+|---|---|---|
+| `$api_host`, `$api_port` | `PGEN_API_HOST` / `PGEN_API_PORT` | Same as the greyscale worker. |
+
+Nothing else is changed. On Windows the worker takes its own portable paths: it cannot read `/proc/cpuinfo`, so it builds the LUT on one thread (no `fork`), and the launcher sets the worker's own `PGEN_AUTOCAL_LUT_NATIVE=0` so it uses its Perl solver instead of the Pi's compiled `pgen_lut_solve` (the worker's comment: "a slow cube is always correct"). `lg.py` ports the `3d-lut/probe` and `3d-lut/upload` routes from `lg.pm`; an upload must name a payload the worker wrote into the run's `luts` folder.
 
 ## Bug fix in the worker (`PC-PORT FIX`)
 

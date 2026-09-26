@@ -152,6 +152,8 @@ class Api:
             ("POST", "/api/lg/picture-settings/set"): self.lg.picture_settings_set,
             ("POST", "/api/lg/1d-dpg/upload"): self.dpg_upload,
             ("POST", "/api/lg/3d-lut/reset"): self.lg.lut3d_reset,
+            ("POST", "/api/lg/3d-lut/probe"): self.lg.lut3d_probe,
+            ("POST", "/api/lg/3d-lut/upload"): self.lg.lut3d_upload,
         }
         handler = routes.get((method, path))
         if handler is None:

@@ -34,8 +34,8 @@ eval { require '/usr/share/PGenerator/PGAutoCalRun.pm'; $PGAC_LOADED = 1; 1 };
 my $config_file = shift || "/tmp/meter_lg_3d_autocal_config.json";
 my $state_file = shift || "/tmp/meter_lg_3d_autocal.json";
 my $stop_file = shift || "/tmp/meter_lg_3d_autocal.stop";
-my $api_host = "127.0.0.1";
-my $api_port = 80;
+my $api_host = $ENV{"PGEN_API_HOST"} || "127.0.0.1"; # PC-PORT: stand-in API address
+my $api_port = $ENV{"PGEN_API_PORT"} || 80; # PC-PORT
 my $json = JSON::PP->new->canonical(1);
 my $cancelled = 0;
 

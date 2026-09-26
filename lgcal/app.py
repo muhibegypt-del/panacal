@@ -28,12 +28,14 @@ from .prepare import clear_calibration, prepare
 from .server import Api, MeterService, make_server
 from .setup import ccss_score, find_argyll, find_ccss, find_perl, meter_command, perl_runtime_env
 from .signal import Reader, detect_range, measure_white, verify, wait_for_meter
+from .colour import build_colour_config, colour_report, commit_greyscale, find_saved_greyscale, verify_colours
 from .dark import extend_dark_end
 from .steps import METER_FLOOR, PICTURE_MODES, build_config
 
 ROOT = Path(__file__).resolve().parents[1]
 PGEN = ROOT / "pgen"
 WORKER = PGEN / "bin" / "meter_lg_autocal.pl"
+COLOUR_WORKER = PGEN / "bin" / "meter_lg_3d_autocal.pl"
 HELPER = PGEN / "bin" / "pgenerator-lg"
 SETTINGS = ROOT / "settings.json"
 DATA_DIR = ROOT / "data" / "lg"
@@ -166,6 +168,10 @@ def perl_env(session_dir: Path | None, port: int | None, helper: Path = HELPER, 
         "PGEN_LG_DATA_DIR": DATA_DIR.as_posix(),
         "PGEN_LG_NATIVE_TLS": "1",
         "PERL5LIB": (PGEN / "share" / "PGenerator").as_posix(),
+        # The colour worker's compiled cube solver is a Pi binary; its own
+        # Perl solver gives the same cube (worker comment: "a slow cube is
+        # always correct").
+        "PGEN_AUTOCAL_LUT_NATIVE": "0",
     }
     if session_dir is not None:
         env["PGEN_LG_TMP_DIR"] = session_dir.as_posix()
@@ -277,19 +283,25 @@ def choose_picture_mode(lg: LG, settings: dict, ask_input=input) -> str:
 
 TV_STATE = {
     "untouched": "Nothing on the TV was changed.",
-    "prepared": ("The picture mode was reset and its calibration cleared, so the TV now shows its factory "
-                 "white balance. Run again to calibrate it."),
-    "calibrating": ("The TV keeps the 1D LUT from the last finished step. Run again for a complete "
-                    "calibration, or use 'Undo LG AutoCal.bat' to return it to factory."),
+    "prepared": ("The picture mode was reset and its calibration data cleared (uncalibrated greys, and the "
+                 "panel's native wide colours). Run again to calibrate it."),
+    "calibrating": ("The TV keeps the 1D LUT from the last finished step, and colours are the panel's native "
+                    "wide range. Run again for a complete calibration."),
     "calibrated": "The calibration is saved in the TV.",
+    "greyscale_saved": ("The greyscale calibration is saved in the TV, but the colour stage did not finish, so "
+                        "saturated colours show the panel's native wide range. Run 'LG Colour AutoCal.bat' to "
+                        "finish them; it keeps the greyscale."),
+    "colour_calibrating": ("The colour stage stopped part way. The greyscale is unchanged. Run "
+                           "'LG Colour AutoCal.bat' again."),
 }
 
 
 def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl: str | None = None,
         session_dir: Path | None = None, extra_env: dict | None = None, config_overrides: dict | None = None,
         delay_scale: float = 1.0, find_tv_on_network: bool = True, pin_input=input,
-        reset_first: bool = True) -> int:
-    """One complete AutoCal. Returns 0 on success, 1 on failure, 2 for a
+        reset_first: bool = True, stages: tuple = ("greyscale", "colour")) -> int:
+    """One complete AutoCal (greyscale, then colour), or the colour stage
+    alone on the greyscale already in the TV (stages=("colour",)). Returns 0 on success, 1 on failure, 2 for a
     deliberate stop with a reason. The keyword hooks exist for the offline
     simulation."""
     with Session(session_dir) as session:
@@ -298,7 +310,8 @@ def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl
         try:
             code = _run(session, settings, tv_state, pattern=pattern, meter=meter, helper=helper, perl=perl,
                         extra_env=extra_env, config_overrides=config_overrides, delay_scale=delay_scale,
-                        find_tv_on_network=find_tv_on_network, pin_input=pin_input, reset_first=reset_first)
+                        find_tv_on_network=find_tv_on_network, pin_input=pin_input, reset_first=reset_first,
+                        stages=stages)
         except KeyboardInterrupt:
             say("Stopped.")
             code = 1
@@ -324,7 +337,7 @@ def run(settings: dict, *, pattern=None, meter=None, helper: Path = HELPER, perl
 
 
 def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, helper, perl, extra_env,
-         config_overrides, delay_scale, find_tv_on_network, pin_input, reset_first) -> int:
+         config_overrides, delay_scale, find_tv_on_network, pin_input, reset_first, stages) -> int:
     log = session.log
     perl = perl or find_perl(settings, say)
     port = free_port(int(settings.get("api_port") or 8765))
@@ -332,8 +345,7 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
     lg = LG(perl, helper, DATA_DIR, log, env)
     owned = []
     server = None
-    worker = None
-    worker_log = None
+    running = [None]     # the worker process in flight
     try:
         if find_tv_on_network:
             find_tv(lg, settings, pin_input)
@@ -368,7 +380,15 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
         reader = Reader(pattern, meter, log, int(settings.get("patch_size") or 10), settle_scale=delay_scale)
         white = wait_for_meter(reader, say)
         limited = detect_range(reader, white["Y"], say)
-        if reset_first:
+        greyscale_table, saved_from = None, None
+        if "greyscale" not in stages:
+            greyscale_table, saved_from = find_saved_greyscale(SESSIONS, picture_mode)
+            if greyscale_table is None:
+                say(f"No finished greyscale calibration of {MODE_NAMES.get(picture_mode, picture_mode)} was found "
+                    "in the sessions folder; the colour stage runs on whatever greyscale the TV has.")
+            else:
+                say(f"Greyscale to keep: the calibration from {saved_from.name} (committed again at the end).")
+        if "greyscale" in stages and reset_first:
             tv_state[0] = "prepared"
             prepare(lg, picture_mode, MODE_NAMES.get(picture_mode, picture_mode), say,
                     sleep=lambda s: time.sleep(s * delay_scale),
@@ -383,8 +403,9 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
                     "-range video; patterns follow it.")
         config = build_config(settings, white["Y"], limited=limited, picture_mode=picture_mode)
         meter_floor = float((settings.get("meter") or {}).get("floor_cd_m2", METER_FLOOR))
-        threshold = config.get("lg_autocal_sdr26_dpg_low_ire_threshold")
+        threshold = config.get("lg_autocal_sdr26_dpg_low_ire_threshold") if "greyscale" in stages else None
         dark_end = None
+        committed = {}
         if threshold:
             say(f"Levels below {threshold:g}% are dimmer than {meter_floor:g} cd/m2, too dark for the meter to "
                 "steer; they follow the curve calibrated above them.")
@@ -399,44 +420,81 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
                     f"(exponents R/G/B {info['exponents']})")
                 (session.directory / "dark_end.json").write_text(
                     json.dumps({**info, "worker_table": table, "committed_table": extended}), encoding="utf-8")
+                committed["table"] = extended
                 return extended
         config.update(config_overrides or {})
 
         meter_settings = settings.get("meter") or {}
         service = MeterService(pattern, meter, log, bool(meter_settings.get("synthetic_black", True)))
         service.delay_scale = delay_scale
+        lg.lut_dir = session.directory / "luts"
+        lg.lut_dir.mkdir(exist_ok=True)
         server = make_server(Api(service, lg, log, final_dpg=dark_end), port)
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
-        state_file = session.directory / "worker_state.json"
-        stop_file = session.directory / "worker.stop"
-        config_file = session.directory / "worker_config.json"
-        config_file.write_text(json.dumps(config, indent=1), encoding="utf-8")
-        state_file.write_text(json.dumps({"status": "running", "autocal": True, "current_step": 0,
-                                          "total_steps": 0, "current_name": "Starting",
-                                          "message": "Starting", "readings": []}), encoding="utf-8")
-        worker_log = (session.directory / "worker.log").open("w", encoding="utf-8")
-        tv_state[0] = "calibrating"
-        worker = subprocess.Popen(
-            # Forward slashes: the worker finds its modules by splitting its
-            # own path on "/".
-            [perl, WORKER.as_posix(), config_file.as_posix(), state_file.as_posix(), stop_file.as_posix()],
-            env={**os.environ, **env}, stdout=worker_log, stderr=subprocess.STDOUT,
-            cwd=str(session.directory),
-            # Ctrl+C must not reach the worker or a helper mid-write to the
-            # TV; stopping goes through the stop file, as on the Pi.
-            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        def launch(script: Path, worker_config: dict, name: str) -> dict:
+            """Run one of the author's workers to the end; returns its final state."""
+            state_file = session.directory / f"{name}_state.json"
+            stop_file = session.directory / f"{name}.stop"
+            config_file = session.directory / f"{name}_config.json"
+            config_file.write_text(json.dumps(worker_config, indent=1), encoding="utf-8")
+            state_file.write_text(json.dumps({"status": "running", "current_step": 0, "total_steps": 0,
+                                              "current_name": "Starting", "message": "Starting",
+                                              "readings": []}), encoding="utf-8")
+            with (session.directory / f"{name}.log").open("w", encoding="utf-8") as worker_log:
+                running[0] = subprocess.Popen(
+                    # Forward slashes: the workers find their modules by
+                    # splitting their own path on "/".
+                    [perl, script.as_posix(), config_file.as_posix(), state_file.as_posix(),
+                     stop_file.as_posix()],
+                    env={**os.environ, **env}, stdout=worker_log, stderr=subprocess.STDOUT,
+                    cwd=str(session.directory),
+                    # Ctrl+C must not reach a worker or a helper mid-write to
+                    # the TV; stopping goes through the stop file, as on the Pi.
+                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+                return monitor(running[0], state_file, stop_file)
+
+        if "greyscale" in stages:
+            tv_state[0] = "calibrating"
+            say("")
+            say("Calibrating the greyscale. Leave the meter where it is; Ctrl+C stops safely.")
+            final = launch(WORKER, config, "worker")
+            if not report(final, session.directory / "worker.log"):
+                return 1
+            tv_state[0] = "greyscale_saved"
+            greyscale_table = committed.get("table") or final.get("sdr_1d_dpg_data")
+
         say("")
-        say("Calibrating. Leave the meter where it is; Ctrl+C stops safely.")
-        final = monitor(worker, state_file, stop_file)
-        worker_log.close()
-        ok = report(final, session.directory / "worker.log")
-        if ok:
+        say("Calibrating colour: white, red, green, blue and black are measured and a 3D LUT maps "
+            "HD (BT.709) colours onto this panel. Greys are left to the greyscale calibration.")
+        if tv_state[0] == "untouched":
+            tv_state[0] = "colour_calibrating"
+        colour_config = build_colour_config(settings, limited=limited, picture_mode=picture_mode,
+                                            lut_dir=lg.lut_dir, run_id=session.directory.name)
+        colour_config.update(config_overrides or {})
+        colour_final = launch(COLOUR_WORKER, colour_config, "colour")
+        colour_ok, colour_message = colour_report(colour_final)
+        say(colour_message if colour_ok else f"The colour stage did not finish: {colour_message}")
+        if not colour_ok:
+            for line in tail(session.directory / "colour.log"):
+                say(f"  {line}")
+        if greyscale_table is not None:
+            recommit = commit_greyscale(lg, greyscale_table, picture_mode)
+            log(f"GREYSCALE recommit: {recommit.get('status')} committed={recommit.get('committed')} "
+                f"{recommit.get('message') or ''}")
+            if not recommit["committed"]:
+                say("Could not confirm the greyscale was committed again "
+                    f"({recommit.get('message') or 'no confirmation from the TV'}); the check below shows "
+                    "what the TV has.")
+        if colour_ok:
             tv_state[0] = "calibrated"
-            result = verify(reader, config["target_gamma"], limited, say, meter_floor)
-            (session.directory / "verification.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
-        return 0 if ok else 1
+        result = verify(reader, config["target_gamma"], limited, say, meter_floor)
+        colours = verify_colours(reader, result["rows"][0]["Y"], limited, say)
+        (session.directory / "verification.json").write_text(
+            json.dumps({**result, "colours": colours}, indent=1), encoding="utf-8")
+        return 0 if colour_ok else 1
     finally:
+        worker = running[0]
         if worker is not None and worker.poll() is None:
             worker.kill()
             worker.wait(timeout=10)
@@ -444,8 +502,6 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
             closed = lg.clear_stale_calibration_mode()
             if closed is not None and closed.get("status") != "ok":
                 say("The TV may still be in calibration mode; switching it off and on clears it.")
-        if worker_log is not None:
-            worker_log.close()
         if server is not None:
             server.shutdown()
             server.server_close()
@@ -605,7 +661,8 @@ def pair_or_undo(settings: dict, command: str) -> int:
                 lg.clear_stale_calibration_mode()
                 mode = choose_picture_mode(lg, settings)
                 clear_calibration(lg, mode, say)
-                say(f"{MODE_NAMES.get(mode, mode)} is back to the TV's factory white balance and LUTs.")
+                say(f"{MODE_NAMES.get(mode, mode)}: white balance and LUTs cleared. Its colours are now the panel's "
+                    "native wide range; run LG AutoCal to calibrate greys and colours.")
             return 0
         except KeyboardInterrupt:
             say("Stopped.")
@@ -622,12 +679,15 @@ def pair_or_undo(settings: dict, command: str) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="LG OLED AutoCal on a PC (PGenerator-Plus worker)")
-    parser.add_argument("command", nargs="?", default="run", choices=["run", "pair", "undo"],
-                        help="run (default); pair: only find and pair the TV; "
-                             "undo: return the TV's white balance and LUTs to factory")
+    parser.add_argument("command", nargs="?", default="run", choices=["run", "colour", "pair", "undo"],
+                        help="run (default): greyscale then colour; colour: only the colour stage, keeping "
+                             "the greyscale in the TV; pair: only find and pair the TV; "
+                             "undo: clear the mode's white balance and LUTs")
     args = parser.parse_args(argv)
     console_click_proof()
     settings = load_settings()
     if args.command in ("pair", "undo"):
         return pair_or_undo(settings, args.command)
+    if args.command == "colour":
+        return run(settings, stages=("colour",))
     return run(settings)

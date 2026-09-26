@@ -42,7 +42,8 @@ FAST = {
 
 def simulate(session_dir: Path, settings: dict | None = None, *, black_level: str = "high",
              gpu_range: str = "full", tv_mode: str = "expert2", stale_calibration: bool = False,
-             reset: bool = True, peak: float = 150.0, meter_class=None):
+             reset: bool = True, peak: float = 150.0, meter_class=None, stages=("greyscale", "colour"),
+             panel=None, tv=None):
     """Returns (exit code, worker state, SimTV, SimMeter, console text)."""
     data_dir = Path(tempfile.mkdtemp(prefix="lgcal-sim-data-"))
     saved_data_dir = app.DATA_DIR
@@ -51,8 +52,10 @@ def simulate(session_dir: Path, settings: dict | None = None, *, black_level: st
         "ip": "192.0.2.10", "manual_ip": "192.0.2.10", "client_key": "sim-key",
         "model_name": SimTV.MODEL["model_name"], "calibration_mode": stale_calibration,
         "calibration_picture_mode": tv_mode if stale_calibration else ""}), encoding="utf-8")
-    panel = Panel(peak=peak, black_level=black_level, gpu_range=gpu_range)
-    tv = SimTV(panel, leftover_calibration=reset)
+    if tv is None:
+        panel = panel or Panel(peak=peak, black_level=black_level, gpu_range=gpu_range)
+        tv = SimTV(panel, leftover_calibration=reset)
+    panel = tv.panel
     tv.picture_mode = tv_mode
     tv.calibration_mode = stale_calibration
     server = serve(tv)
@@ -67,7 +70,7 @@ def simulate(session_dir: Path, settings: dict | None = None, *, black_level: st
                                perl=find_test_perl(), session_dir=session_dir,
                                extra_env={"PGEN_SIM_PORT": str(server.server_address[1])},
                                config_overrides=FAST, delay_scale=0.0, find_tv_on_network=False,
-                               reset_first=reset)
+                               reset_first=reset, stages=stages)
             except SystemExit as exc:
                 print(exc)
                 code = 2

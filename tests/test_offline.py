@@ -349,8 +349,11 @@ class SimulationTests(unittest.TestCase):
         self.assertLess(verification["average_de"], 0.6)
         self.assertLess(verification["max_de"], 1.2)
         for row in verification["rows"]:
-            self.assertAlmostEqual(row["x"], 0.3127, delta=0.0015)
-            self.assertAlmostEqual(row["y"], 0.3290, delta=0.0015)
+            # Levels below the meter floor are extrapolated, not measured by
+            # the solver: a looser bound that still catches a real error.
+            delta = 0.004 if row.get("below_floor") else 0.0015
+            self.assertAlmostEqual(row["x"], 0.3127, delta=delta, msg=f"{row['level']}%")
+            self.assertAlmostEqual(row["y"], 0.3290, delta=delta, msg=f"{row['level']}%")
 
     def test_full_range_tv(self):
         result = self.simulate(tv_mode="expert2")

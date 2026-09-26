@@ -1,6 +1,6 @@
 # LG OLED AutoCal on a PC
 
-This runs BigShoots' **PGenerator-Plus LG AutoCal** from a Windows PC, with no Raspberry Pi. It is the SDR 26-point greyscale calibration: white balance and gamma, written into the TV's 1D LUT. The calibration and TV code is the author's, used with his permission (see `NOTICE.md`). `PATCHES.md` lists the few lines changed to run on Windows, plus one upstream bug fix.
+This runs BigShoots' **PGenerator-Plus LG AutoCal** from a Windows PC, with no Raspberry Pi. It runs two of the author's calibrations in turn: the SDR 26-point greyscale (white balance and gamma, written into the TV's 1D LUT), then colour (a 3D LUT that maps HD/BT.709 colours onto the panel). The calibration and TV code is the author's, used with his permission (see `NOTICE.md`). `PATCHES.md` lists the few lines changed to run on Windows, plus one upstream bug fix.
 
 ## Use it
 
@@ -22,13 +22,16 @@ There is nothing to configure. Everything that could stop the run (tools, TV, di
 | Video range | Measures whether the TV expects full or limited range and draws patterns to match, so the TV's Black Level setting can stay as it is. If the PC sends limited range to a TV set to full, black is lifted; it stops before changing anything and says which setting to change. |
 | Calibrate | Runs the author's worker: 100% white, then 50%, 25%, 75% and 95% down to 2.3%, uploading a corrected 1D LUT until each level is within dE ITP 0.5. It then commits the LUT and closes calibration mode. |
 | Dark levels | A Spyder5 stops tracking the TV at about 0.3 cd/m² (7% on a 200 cd/m² white). Levels dimmer than that are not steered by the meter: the worker takes one look and moves on, and the committed LUT carries the curve calibrated at the next four levels down to black. The session's `dark_end.json` has the worker's table and the committed one. |
-| Verify | Measures 100% down to 5% again on the finished calibration and prints dE ITP per level, using the author's formula. The numbers are a fresh measurement, not the solver's own. Levels dimmer than the meter floor are marked `*` and left out of the average. |
+| Colour | The greyscale preparation clears LG's stored calibration data, which includes its factory BT.709 colour conversion, so the panel would show its native wide colours. The author's colour worker measures white, red, green, blue and black, and uploads a 3D LUT that maps BT.709 onto the measured panel. The 3D LUT leaves greys to the 1D LUT, and the greyscale table is committed again at the end. |
+| Verify | Measures 100% down to 5% again on the finished calibration, then red, green, blue, cyan, magenta and yellow at full signal, and prints dE ITP for each against BT.709, using the author's formula. The numbers are a fresh measurement, not the solver's own. Levels dimmer than the meter floor are marked `*` and left out of the average. |
 
 Ctrl+C stops safely. The worker finishes its current write and closes calibration mode.
 
 Whenever a run stops, the last lines say why, what state the TV was left in (untouched, reset but not yet calibrated, or partly calibrated), and where the session folder is.
 
-**Undo LG AutoCal.bat** returns the TV's current picture mode to its factory white balance and LUTs.
+**LG Colour AutoCal.bat** runs only the colour stage on the picture mode the TV is in. It finds that mode's last finished greyscale calibration in `sessions\`, keeps it, and commits it again at the end.
+
+**Undo LG AutoCal.bat** clears the current picture mode's white balance and LUTs. It does not bring back LG's factory colours; run LG AutoCal afterwards.
 
 Each run keeps everything in `sessions\<date_time>\`: `console.txt` (what the window showed), every reading and TV request, the worker's log and state, and `verification.json`.
 
@@ -50,7 +53,7 @@ Copy `settings.example.json` to `settings.json` only to change a default. The fi
 ## Scope
 
 - SDR only. HDR10 and Dolby Vision need HDR signalling and 10-bit patterns, which a Windows desktop window cannot produce.
-- The 3D LUT and CMS workflows are not included.
+- Colour uses the author's `matrix` method (5 patches). His finer methods (ramp, lattice, skeleton) are not wired in.
 - Patches are 8-bit RGB. This is the worker's 8-bit path. On that path the worker turns off its OLED pattern insertion (grey flashes between readings); it uses insertion only with 10-bit patterns.
 
 ## Offline tests

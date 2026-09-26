@@ -24,6 +24,25 @@ M709 = ((0.4124564, 0.3575761, 0.1804375),
         (0.0193339, 0.1191920, 0.9503041))
 
 
+def rgb_to_xyz_matrix(primaries, white=(0.3127, 0.3290)):
+    """RGB -> XYZ for the given xy primaries, scaled so RGB 1,1,1 is the white at Y=1."""
+    cols = [(x / y, 1.0, (1 - x - y) / y) for x, y in primaries]
+    wx, wy = white
+    W = (wx / wy, 1.0, (1 - wx - wy) / wy)
+    m = [[cols[c][r] for c in range(3)] for r in range(3)]
+    det = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+           + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+    inv = [[(m[(j + 1) % 3][(i + 1) % 3] * m[(j + 2) % 3][(i + 2) % 3]
+             - m[(j + 1) % 3][(i + 2) % 3] * m[(j + 2) % 3][(i + 1) % 3]) / det for j in range(3)] for i in range(3)]
+    scale = [sum(inv[i][k] * W[k] for k in range(3)) for i in range(3)]
+    return tuple(tuple(m[r][c] * scale[c] for c in range(3)) for r in range(3))
+
+
+# The G2's primaries with LG's calibration data cleared, as measured in HCFR.
+NATIVE_PRIMARIES = ((0.6746, 0.3221), (0.2537, 0.6604), (0.1460, 0.0462))
+M_NATIVE = rgb_to_xyz_matrix(NATIVE_PRIMARIES)
+
+
 def identity(index: float) -> float:
     return index * 32767 / 1023
 
@@ -59,6 +78,76 @@ def sample_index(code8: int, black_level: str = "high", gpu_range: str = "full")
     return float(indexes[-1])
 
 
+def sample_index_f(code: float, black_level: str = "high", gpu_range: str = "full") -> float:
+    """sample_index for the fractional code a 3D LUT hands the 1D stage."""
+    wire = 16 + code * 219 / 255 if gpu_range == "limited" else code
+    if black_level == "low":
+        legal = min(940.0, max(64.0, wire * 4))
+    else:
+        legal = 64 + (1023.0 if wire >= 255 else wire * 4) * 876 / 1023
+    codes, indexes = LADDER_CODES, LADDER_INDEXES
+    if legal <= codes[0]:
+        slope = (indexes[1] - indexes[0]) / (codes[1] - codes[0])
+        return max(0.0, indexes[0] + (legal - codes[0]) * slope)
+    for k in range(len(codes) - 1):
+        if codes[k] <= legal <= codes[k + 1]:
+            f = (legal - codes[k]) / (codes[k + 1] - codes[k])
+            return indexes[k] + (indexes[k + 1] - indexes[k]) * f
+    return float(indexes[-1])
+
+
+class Lut3D:
+    """An LG 33x33x33 12-bit 3D LUT (R fastest, G, B slowest), trilinear."""
+
+    SIZE = 33
+
+    def __init__(self, values: list[int]):
+        if len(values) != self.SIZE ** 3 * 3:
+            raise ValueError("a 33^3 3D LUT has 107811 values")
+        self.values = values
+
+    @classmethod
+    def read(cls, path: str) -> "Lut3D":
+        import struct
+        with open(path, "rb") as handle:
+            data = handle.read()
+        return cls(list(struct.unpack(f"<{len(data) // 2}H", data)))
+
+    def node(self, r: int, g: int, b: int) -> tuple[float, float, float]:
+        n = self.SIZE
+        i = (r + g * n + b * n * n) * 3
+        return tuple(v / 4095 for v in self.values[i:i + 3])
+
+    def apply(self, rgb: tuple[float, float, float]) -> tuple[float, float, float]:
+        """Tetrahedral interpolation, as display LUT hardware does: the grey
+        diagonal is an edge of every tetrahedron it crosses, so an identity
+        grey axis passes greys through unchanged."""
+        n1 = self.SIZE - 1
+        pos = [min(n1, max(0.0, c * n1)) for c in rgb]
+        lo = [min(n1 - 1, int(p)) for p in pos]
+        fr, fg, fb = (p - l for p, l in zip(pos, lo))
+        r0, g0, b0 = lo
+        c000 = self.node(r0, g0, b0)
+        c111 = self.node(r0 + 1, g0 + 1, b0 + 1)
+        if fr >= fg >= fb:
+            path = ((fr, (1, 0, 0)), (fg, (1, 1, 0)))
+        elif fr >= fb >= fg:
+            path = ((fr, (1, 0, 0)), (fb, (1, 0, 1)))
+        elif fb >= fr >= fg:
+            path = ((fb, (0, 0, 1)), (fr, (1, 0, 1)))
+        elif fg >= fr >= fb:
+            path = ((fg, (0, 1, 0)), (fr, (1, 1, 0)))
+        elif fg >= fb >= fr:
+            path = ((fg, (0, 1, 0)), (fb, (0, 1, 1)))
+        else:
+            path = ((fb, (0, 0, 1)), (fg, (0, 1, 1)))
+        (w1, d1), (w2, d2) = path
+        w3 = min(fr, fg, fb)
+        c1 = self.node(r0 + d1[0], g0 + d1[1], b0 + d1[2])
+        c2 = self.node(r0 + d2[0], g0 + d2[1], b0 + d2[2])
+        return tuple((1 - w1) * c000[i] + (w1 - w2) * c1[i] + (w2 - w3) * c2[i] + w3 * c111[i] for i in range(3))
+
+
 class Panel:
     def __init__(self, peak: float = 150.0, gains=(1.0, 0.95, 1.08), gammas=(2.32, 2.20, 2.40),
                  black_level: str = "high", gpu_range: str = "full"):
@@ -68,6 +157,10 @@ class Panel:
         self.gains = gains
         self.gammas = gammas
         self.dpg = [[identity(i) for i in range(1024)] for _ in range(3)]
+        # LG's factory data maps BT.709 onto the panel; the SDR reference
+        # reset replaces it with identity, leaving the native primaries.
+        self.gamut = M709
+        self.lut: Lut3D | None = None
         self.reference = identity(sample_index(255))  # legal white 940
         self.lock = threading.Lock()
 
@@ -81,11 +174,16 @@ class Panel:
     def xyz(self, rgb: tuple[int, int, int]) -> tuple[float, float, float]:
         with self.lock:
             light = []
-            for channel, code in enumerate(rgb):
-                index = sample_index(code, self.black_level, self.gpu_range)
+            if self.lut is None:
+                indexes = [sample_index(code, self.black_level, self.gpu_range) for code in rgb]
+            else:
+                mapped = self.lut.apply(tuple(code / 255 for code in rgb))
+                indexes = [sample_index_f(v * 255, self.black_level, self.gpu_range) for v in mapped]
+            for channel, index in enumerate(indexes):
                 drive = max(0.0, self.table_value(channel, index) / self.reference)
                 light.append(self.gains[channel] * drive ** self.gammas[channel])
-        return tuple(self.peak * sum(M709[row][c] * light[c] for c in range(3)) for row in range(3))
+            gamut = self.gamut
+        return tuple(self.peak * sum(gamut[row][c] * light[c] for c in range(3)) for row in range(3))
 
     def upload(self, data: list[int]) -> None:
         with self.lock:
@@ -168,6 +266,7 @@ class SimTV:
                    "whiteBalanceBlue": [0] * 26, "adjustingLuminance": [0] * 26}
         self.requests: list[str] = []
         self.uploads = 0
+        self.lut_uploads = 0
 
     def settings(self) -> dict:
         return {"pictureMode": self.picture_mode, "whiteBalanceMethod": "22", "whiteBalanceIre": "100",
@@ -233,10 +332,27 @@ class SimTV:
             return {**ok, "picture_settings": self.settings(), "message": "picture mode reset"}
         if action == "sdr_calman_reset":
             self.neutral()
+            self.panel.gamut = M_NATIVE      # identity 3x3: the factory BT.709 mapping is gone
+            self.panel.lut = None
             self.calibration_mode = False
             return {**ok, "message": "SDR reference reset"}
+        lut_ok = {"upload_command": "BT709_3D_LUT_DATA", "get_command": "GET_3D_LUT_DATA",
+                  "upload_verified": True, "upload_supported": True,
+                  "cal_start_response": {"type": "response"}, "cal_end_response": {"type": "response"}}
         if action == "3d_lut_reset":
-            return {**ok, "reset_to_unity": True, "message": "3D LUT reset"}
+            self.panel.lut = None
+            self.calibration_mode = bool(request.get("keep_calibration_mode"))
+            return {**ok, **lut_ok, "reset_to_unity": True, "message": "LG 3D LUT reset to unity and verified."}
+        if action == "3d_lut_probe":
+            return {**ok, **lut_ok, "message": "3D LUT upload supported"}
+        if action == "3d_lut_upload":
+            try:
+                self.panel.lut = Lut3D.read(request.get("payload_path") or "")
+            except (OSError, ValueError) as exc:
+                return {"status": "error", "message": f"bad 3D LUT payload: {exc}"}
+            self.lut_uploads += 1
+            self.calibration_mode = bool(request.get("keep_calibration_mode"))
+            return {**ok, **lut_ok, "message": "LG 3D LUT uploaded and verified."}
         return {"status": "error", "message": f"simulated TV does not implement {action}"}
 
 

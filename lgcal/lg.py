@@ -92,6 +92,7 @@ class LG:
         self.log = log
         self.env = env or {}
         self.gate = threading.Lock()
+        self.lut_dir: Path | None = None   # where the colour worker writes 3D LUT payloads
         data_dir.mkdir(parents=True, exist_ok=True)
 
     # --- clients.json -----------------------------------------------------
@@ -492,6 +493,47 @@ class LG:
             result["message"] = ("The saved LG client key does not have calibration permission. "
                                  "Pair again with 'Pair LG TV.bat', then rerun AutoCal.")
         return result
+
+    def lut3d_probe(self, payload: dict) -> dict:
+        """lg.pm webui_lg_3d_lut_probe."""
+        ready, error = self._ready(payload, "probing 3D LUT support")
+        if error:
+            return error
+        clients, ip, key = ready
+        result = self.run_helper({
+            "action": "3d_lut_probe", "ip": ip, "client_key": key,
+            "picture_mode": payload.get("picture_mode") or clients.get("calibration_picture_mode") or "",
+            "signal_mode": payload.get("signal_mode") or "", "write_probe": bool(payload.get("write_probe")),
+            "connect_timeout": 5})
+        if result.get("status") == "ok":
+            self.update_connect_metadata(result, clients.get("manual_ip") or ip)
+        return result
+
+    def lut3d_upload(self, payload: dict) -> dict:
+        """lg.pm webui_lg_3d_lut_upload: the payload file must be one the
+        colour worker wrote into this run's LUT folder."""
+        path = payload.get("payload_path") or ""
+        if not self.lut_payload_ok(path):
+            return {"status": "error", "message": "LG 3D LUT upload requires a payload written by this run "
+                                                  f"(under {self.lut_dir or 'the session LUT folder'})."}
+        result = self._held_upload(payload, "3d_lut_upload", "uploading a 3D LUT", {
+            "payload_path": path,
+            "upload_command": payload.get("upload_command") or "",
+            "get_command": payload.get("get_command") or "",
+        })
+        if self.needs_repair(result):
+            result["message"] = ("The saved LG client key does not have calibration permission. "
+                                 "Pair again with 'Pair LG TV.bat', then rerun.")
+        return result
+
+    def lut_payload_ok(self, path: str) -> bool:
+        if not path or self.lut_dir is None:
+            return False
+        try:
+            target = Path(path).resolve()
+            return target.is_file() and Path(self.lut_dir).resolve() in target.parents
+        except OSError:
+            return False
 
     def lut3d_reset(self, payload: dict) -> dict:
         return self._held_upload(payload, "3d_lut_reset", "resetting the 3D LUT", {
