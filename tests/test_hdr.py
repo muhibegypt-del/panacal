@@ -82,6 +82,30 @@ class FakeMadHcNet:
         return call
 
 
+class FakeWindows:
+    """The TV (DISPLAY2) sits left of the main screen."""
+    def __init__(self):
+        self.moves, self.where, self.stuck = [], {7: r"\\.\DISPLAY1"}, False
+
+    def monitor_rect(self, device):
+        return {r"\\.\DISPLAY2": (-3840, 0, 0, 2160), r"\\.\DISPLAY1": (0, 0, 2560, 1440)}.get(device)
+
+    def windows(self, _pid):
+        return [7]
+
+    def area(self, _hwnd):
+        return 1
+
+    def move(self, hwnd, rect):
+        self.moves.append((hwnd, rect))
+        if not self.stuck:
+            self.where[hwnd] = r"\\.\DISPLAY2"
+        return True
+
+    def monitor_of(self, hwnd):
+        return self.where[hwnd]
+
+
 class MadTPG(unittest.TestCase):
     def test_codes_go_through_at_full_precision_and_area_is_set_once(self):
         api = FakeMadHcNet()
@@ -114,6 +138,24 @@ class MadTPG(unittest.TestCase):
         self.assertEqual(api.calls[-3:], [("SetHdrMetadata", *HDR_METADATA), ("SetHdrButton", True),
                                           ("IsHdrButtonPressed",)])
         self.assertFalse(tpg.to_screen({"device": ""}))          # display setup failed: user drags it
+
+    def test_windows_own_calls_move_it_to_the_tvs_monitor(self):
+        windows = FakeWindows()
+        api = FakeMadHcNet()
+        tpg = MadTPGPatterns(Path("."), lambda _m: None, api=api, launch=False, sleep=lambda _s: None,
+                             windows=windows)
+        # DisplayTool's position is ignored when Windows names the monitor
+        self.assertTrue(tpg.to_screen({"device": r"\\.\DISPLAY2", "x": 0, "y": 0, "width": 1, "height": 1}))
+        self.assertEqual(windows.moves, [(7, (-2880, 540, -960, 1620))])
+        self.assertNotIn("place", [c[0] for c in api.calls])
+        self.assertTrue(tpg.keep_on({"device": r"\\.\DISPLAY2"}))
+        self.assertEqual(len(windows.moves), 1)                  # still there: left alone
+        windows.where[7] = r"\\.\DISPLAY1"                    # HDMI resync sent it to the main screen
+        self.assertTrue(tpg.keep_on({"device": r"\\.\DISPLAY2"}))
+        self.assertEqual(len(windows.moves), 2)
+        windows.stuck = True
+        windows.where[7] = r"\\.\DISPLAY1"
+        self.assertFalse(tpg.to_screen({"device": r"\\.\DISPLAY2"}))
 
     def test_refusals_fall_back_to_asking(self):
         api = FakeMadHcNet()

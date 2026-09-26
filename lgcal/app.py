@@ -530,12 +530,27 @@ def _run_hdr(session: Session, settings: dict, tv_state: list, *, pattern, meter
                 pattern.api.SetDeviceGammaRamp(None)       # linear GPU ramp for the run
             except Exception as exc:  # older madHcNet: dispwin is not used for HDR
                 log(f"madTPG gamma ramp not reset: {exc!r}")
-            on_screen = pattern.to_screen(display)
+            # HDR first: switching it on resyncs the TV's HDMI link, and Windows
+            # can move windows to the main screen while the TV drops out.
             hdr_pressed = pattern.hdr_on()
+            time.sleep(4)
+            on_screen = pattern.to_screen(display)
+            keep = (lambda: pattern.keep_on(display)) if on_screen else None
         else:
             on_screen = hdr_pressed = True
+            keep = None
         picture_mode = wait_for_hdr(lg, say, HDR_PICTURE_MODES, sleep=sleep, on_screen=on_screen,
-                                    hdr=hdr_pressed)
+                                    hdr=hdr_pressed, keep=keep)
+        if keep:
+            time.sleep(4)          # the TV's own switch into its HDR mode resyncs once more
+            if not keep():
+                say("madTPG would not stay on the TV. Drag it onto the TV and double-click it for "
+                    "fullscreen; the run carries on by itself once it is there.")
+                started = time.monotonic()
+                while not (pattern.on_tv(display) and pattern.api.IsFullscreen()):
+                    if time.monotonic() - started > 600:
+                        raise SystemExit("madTPG was not put fullscreen on the TV within 10 minutes.")
+                    time.sleep(1)
         say(f"Calibrating the HDR picture mode the TV is in: {HDR_MODE_NAMES.get(picture_mode, picture_mode)}")
         if meter is None:
             meter = open_meter(settings, lg, log, owned)

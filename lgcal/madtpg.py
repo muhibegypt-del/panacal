@@ -113,15 +113,122 @@ class MadHcNet:
         return getattr(self.dll, "madVR_" + name)
 
 
+class Win32Windows:
+    """Monitors and top-level windows through user32, in physical pixels
+    (per-monitor DPI aware), so a window lands on the TV whatever the
+    scaling of either screen."""
+
+    SWP_NOZORDER, SWP_NOACTIVATE, SW_RESTORE, MONITOR_DEFAULTTONEAREST = 0x0004, 0x0010, 9, 2
+
+    def __init__(self):
+        from ctypes import wintypes as w
+        self.w = w
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [("cbSize", w.DWORD), ("rcMonitor", w.RECT), ("rcWork", w.RECT),
+                        ("dwFlags", w.DWORD), ("szDevice", w.WCHAR * 32)]
+        self.MonitorInfo = MonitorInfo
+        self.MonitorProc = ctypes.WINFUNCTYPE(w.BOOL, w.HMONITOR, w.HDC, ctypes.POINTER(w.RECT), w.LPARAM)
+        self.WindowProc = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
+        u = self.user32
+        u.EnumDisplayMonitors.argtypes = [w.HDC, ctypes.c_void_p, self.MonitorProc, w.LPARAM]
+        u.GetMonitorInfoW.argtypes = [w.HMONITOR, ctypes.POINTER(MonitorInfo)]
+        u.MonitorFromWindow.argtypes = [w.HWND, w.DWORD]
+        u.MonitorFromWindow.restype = w.HMONITOR
+        u.EnumWindows.argtypes = [self.WindowProc, w.LPARAM]
+        u.GetWindowThreadProcessId.argtypes = [w.HWND, ctypes.POINTER(w.DWORD)]
+        u.IsWindowVisible.argtypes = [w.HWND]
+        u.IsIconic.argtypes = [w.HWND]
+        u.IsZoomed.argtypes = [w.HWND]
+        u.ShowWindow.argtypes = [w.HWND, ctypes.c_int]
+        u.GetWindowRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
+        u.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
+        u.SetWindowPos.argtypes = [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, w.UINT]
+        u.SetForegroundWindow.argtypes = [w.HWND]
+
+    def _aware(self) -> None:
+        try:   # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (Windows 10 1703+)
+            self.user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+            self.user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+            self.user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+        except AttributeError:
+            pass
+
+    def _info(self, monitor):
+        info = self.MonitorInfo()
+        info.cbSize = ctypes.sizeof(info)
+        return info if self.user32.GetMonitorInfoW(monitor, ctypes.byref(info)) else None
+
+    def monitor_rect(self, device: str) -> tuple[int, int, int, int] | None:
+        """Desktop rectangle of the monitor Windows calls `device` (\\.\DISPLAYn)."""
+        self._aware()
+        found = []
+
+        def each(monitor, _dc, _rect, _data):
+            info = self._info(monitor)
+            if info and info.szDevice.lower() == device.lower():
+                r = info.rcMonitor
+                found.append((r.left, r.top, r.right, r.bottom))
+            return True
+        self.user32.EnumDisplayMonitors(None, None, self.MonitorProc(each), 0)
+        return found[0] if found else None
+
+    def windows(self, pid: int | None) -> list[int]:
+        """Visible top-level windows of process `pid`, else any titled madTPG."""
+        self._aware()
+        mine, titled = [], []
+
+        def each(hwnd, _data):
+            if self.user32.IsWindowVisible(hwnd):
+                owner = self.w.DWORD()
+                self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                title = ctypes.create_unicode_buffer(256)
+                self.user32.GetWindowTextW(hwnd, title, 256)
+                if pid and owner.value == pid:
+                    mine.append(hwnd)
+                elif "madtpg" in title.value.lower():
+                    titled.append(hwnd)
+            return True
+        self.user32.EnumWindows(self.WindowProc(each), 0)
+        return mine or titled
+
+    def area(self, hwnd: int) -> int:
+        r = self.w.RECT()
+        self.user32.GetWindowRect(hwnd, ctypes.byref(r))
+        return max(0, r.right - r.left) * max(0, r.bottom - r.top)
+
+    def move(self, hwnd: int, rect: tuple[int, int, int, int]) -> bool:
+        self._aware()
+        if self.user32.IsIconic(hwnd) or self.user32.IsZoomed(hwnd):
+            self.user32.ShowWindow(hwnd, self.SW_RESTORE)
+        left, top, right, bottom = rect
+        moved = bool(self.user32.SetWindowPos(hwnd, None, left, top, right - left, bottom - top,
+                                              self.SWP_NOZORDER | self.SWP_NOACTIVATE))
+        self.user32.SetForegroundWindow(hwnd)
+        return moved
+
+    def monitor_of(self, hwnd: int) -> str:
+        self._aware()
+        info = self._info(self.user32.MonitorFromWindow(hwnd, self.MONITOR_DEFAULTTONEAREST))
+        return info.szDevice if info else ""
+
+
 class MadTPGPatterns:
     """The pattern interface the run uses (show / show_code / close),
     drawn by madTPG. show() takes 8-bit codes; show_code() keeps the
     worker's 10-bit precision."""
 
-    def __init__(self, folder: Path, log, api=None, launch=True, sleep=time.sleep):
+    def __init__(self, folder: Path, log, api=None, launch=True, sleep=time.sleep, windows=None):
         self.log = log
         self.sleep = sleep
         self.process = None
+        self.windows = windows
+        if windows is None and api is None and os.name == "nt":
+            try:
+                self.windows = Win32Windows()
+            except (OSError, AttributeError) as exc:
+                log(f"madTPG window control unavailable: {exc!r}")
         if launch and api is None:
             self.process = subprocess.Popen([str(folder / "madTPG.exe")], cwd=str(folder))
         self.api = api or MadHcNet(folder / "madHcNet64.dll")
@@ -152,26 +259,61 @@ class MadTPGPatterns:
         if not self.api.ShowRGB(*(min(1.0, max(0.0, v / top)) for v in (r, g, b))):
             raise RuntimeError("madTPG stopped showing patterns (its window was closed?)")
 
-    def to_screen(self, display: dict) -> bool:
-        """Window onto the TV's desktop area, then fullscreen there.
-        True once madTPG reports fullscreen."""
-        try:
-            x, y = int(display["x"]), int(display["y"])
-            width, height = int(display["width"]), int(display["height"])
-        except (KeyError, TypeError, ValueError):
+    def _windows(self) -> list:
+        pid = self.process.pid if self.process is not None else None
+        return self.windows.windows(pid) if self.windows else []
+
+    def on_tv(self, display: dict) -> bool:
+        """madTPG's (largest) window is on the TV's monitor."""
+        device = str(display.get("device") or "")
+        found = self._windows()
+        if not (device and found):
             return False
+        return self.windows.monitor_of(max(found, key=self.windows.area)).lower() == device.lower()
+
+    def to_screen(self, display: dict) -> bool:
+        """madTPG window onto the TV's monitor, then fullscreen there. True
+        once it is fullscreen on the TV. Windows' own window calls place
+        it (madTPG's SetWindowSize is the fallback), in physical pixels."""
+        device = str(display.get("device") or "")
+        target = self.windows.monitor_rect(device) if (self.windows and device) else None
+        if target is None:
+            try:
+                x, y = int(display["x"]), int(display["y"])
+                target = (x, y, x + int(display["width"]), y + int(display["height"]))
+            except (KeyError, TypeError, ValueError):
+                self.log(f"madTPG: no position known for the TV ({device or 'no display'})")
+                return False
+        left, top, right, bottom = target
+        width, height = right - left, bottom - top
+        window = (left + width // 4, top + height // 4, left + 3 * width // 4, top + 3 * height // 4)
         try:
             self.api.LeaveFullscreen()
-            placed = self.api.place(x + width // 4, y + height // 4, x + 3 * width // 4, y + 3 * height // 4)
-            fullscreen = placed and self.api.EnterFullscreen()
-            self.sleep(1)
-            fullscreen = fullscreen and self.api.IsFullscreen()
+            self.sleep(0.5)
+            found = self._windows()
+            if found:
+                moved = all([self.windows.move(hwnd, window) for hwnd in found])
+            else:
+                moved = bool(self.api.place(*window))
+            self.sleep(0.5)
+            self.api.EnterFullscreen()
+            self.sleep(1.5)
+            fullscreen = bool(self.api.IsFullscreen())
         except Exception as exc:
             self.log(f"madTPG window placement failed: {exc!r}")
             return False
-        self.log(f"madTPG window on {display.get('device')} at {x},{y} {width}x{height}: "
-                 f"placed={bool(placed)} fullscreen={bool(fullscreen)}")
-        return bool(fullscreen)
+        there = self.on_tv(display) if self.windows else moved
+        self.log(f"madTPG window to {device} {target}: windows={len(found)} moved={moved} "
+                 f"fullscreen={fullscreen} on_tv={there}")
+        return fullscreen and there
+
+    def keep_on(self, display: dict) -> bool:
+        """Put madTPG back on the TV if Windows moved it (an HDMI resync when
+        the TV switches into HDR can send windows to the main screen)."""
+        if not self.windows or self.on_tv(display):
+            return True
+        self.log("madTPG left the TV; moving it back")
+        return self.to_screen(display)
 
     def hdr_on(self) -> bool:
         """HDR metadata set and the HDR button pressed; True once madTPG
@@ -204,10 +346,11 @@ class MadTPGPatterns:
 
 
 def wait_for_hdr(lg, say, modes, timeout: float = 600, clock=time.monotonic, sleep=time.sleep,
-                 on_screen: bool = False, hdr: bool = False) -> str:
+                 on_screen: bool = False, hdr: bool = False, keep=None) -> str:
     """Wait until the TV reports an HDR picture mode (madTPG's HDR button
     switches the TV into HDR). Returns that mode. on_screen / hdr: madTPG
-    already went fullscreen on the TV / pressed its HDR button itself."""
+    already went fullscreen on the TV / pressed its HDR button itself.
+    keep: called while waiting, to put madTPG back on the TV if it moved."""
     steps = []
     if not on_screen:
         steps.append("Drag the madTPG window onto the TV and double-click it for fullscreen.")
@@ -232,6 +375,8 @@ def wait_for_hdr(lg, say, modes, timeout: float = 600, clock=time.monotonic, sle
             say(f"  The TV is in HDR but in {mode}, which LG does not accept calibration for. Pick Cinema, "
                 "Cinema Home, Filmmaker or Game Optimizer on the TV.")
             shown = mode
+        if keep:
+            keep()
         sleep(2)
     raise SystemExit("The TV did not switch to an HDR picture mode within 10 minutes. Check madTPG's HDR "
                      "button is on and Windows HDR is off for the TV, then run again.")
