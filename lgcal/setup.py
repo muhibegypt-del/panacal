@@ -283,30 +283,48 @@ def ccss_dirs() -> list[Path]:
     return dirs
 
 
-def ccss_score(path: Path) -> int:
-    """3: made for LG's white-subpixel (WRGB/WOLED) panels. 0: anything else.
-    RGB-OLED corrections (phone/Samsung panels) are not used on a WOLED TV."""
+def ccss_score(path: Path, model: str = "") -> int:
+    """How well a spectral correction fits the connected LG.
+
+    0: not for a white-subpixel (WRGB/WOLED) panel, or made on an LCD (LG
+    gives its QNED/NanoCell LCDs the same EDID name, "LG TV SSCR2").
+    3: any LG WOLED. 5: same model year. 8: same series (G2). 10: same
+    size and series (55G2)."""
     try:
         head = path.read_text(encoding="latin-1", errors="replace")[:4000]
     except OSError:
         return 0
-    text = (path.name + " " + " ".join(re.findall(r'(?:DISPLAY|TECHNOLOGY|DESCRIPTOR)\s+"([^"]*)"', head))).upper()
-    if re.search(r"WOLED|WRGB|W-OLED|WHITE OLED", text):
-        return 3
-    if "OLED" in text and re.search(r"\bLG\b|C\d\b|G\d\b|B\d\b|CX|GX|BX", text):
-        return 3
-    return 0
+    fields = dict(re.findall(r'^(DISPLAY|TECHNOLOGY|DESCRIPTOR)\s+"([^"]*)"', head, re.MULTILINE))
+    text = (path.name + " " + " ".join(fields.values())).upper()
+    technology = fields.get("TECHNOLOGY", "").upper()
+    if "LCD" in technology or re.search(r"QNED|NANO", text):
+        return 0
+    if not (re.search(r"WOLED|WRGB|W-OLED|WHITE OLED", text)
+            or ("OLED" in text and re.search(r"\bLG\b|C\d\b|G\d\b|B\d\b|CX|GX|BX", text))):
+        return 0
+    series = re.match(r"OLED(\d{2})([A-Z])(\d)", (model or "").upper())
+    if series:
+        size, letter, year = series.groups()
+        if re.search(rf"(?<![0-9]){size}\s*{letter}{year}(?![0-9])", text):
+            return 10
+        if re.search(rf"(?:(?<![0-9])\d{{2}}\s*|(?<![A-Z0-9])){letter}{year}(?![0-9])", text):
+            return 8
+        if re.search(rf"(?:(?<![0-9])\d{{2}}\s*|(?<![A-Z0-9]))[ABCGMRWZ]{year}(?![0-9])", text):
+            return 5
+    return 3
 
 
-def find_ccss(settings: dict) -> str:
+def find_ccss(settings: dict, model: str = "") -> str:
+    """settings meter.ccss, else the best match for the TV model (the
+    bundled ccss folder wins ties)."""
     chosen = (settings.get("meter") or {}).get("ccss") or ""
     if chosen:
         return chosen
     best = ("", 0)
     for directory in ccss_dirs():
         if directory.is_dir():
-            for path in directory.rglob("*.ccss"):
-                score = ccss_score(path)
+            for path in sorted(directory.rglob("*.ccss")):
+                score = ccss_score(path, model)
                 if score > best[1]:
                     best = (str(path), score)
     return best[0]

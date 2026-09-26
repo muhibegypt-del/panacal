@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from lgcal import app
@@ -113,6 +114,34 @@ class MetricTests(unittest.TestCase):
             self.assertEqual(ccss_score(directory / "x.ccss"), 3)
         finally:
             shutil.rmtree(directory)
+
+    def test_the_correction_for_the_connected_model_wins(self):
+        """LG gives its 2021+ TVs, OLED and LCD alike, the EDID name
+        "LG TV SSCR2": the model decides, and LCD corrections are never used."""
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        files = {
+            "six.ccss": ("WOLED (LG OLED 6-Series)", "LG OLED 6 series", "WOLED"),
+            "c1.ccss": ("LG C1 WBE panel wide gamut mode LG TV SSCR2 (i1 Pro 2)", "LG TV SSCR2", "LED WOLED"),
+            "c2.ccss": ("LG42C2 (i1 Pro 2)", "LG TV SSCR2", "LED WOLED"),
+            "g2.ccss": ("LG OLED G2", "LG TV SSCR2", "LED WOLED"),
+            "qned.ccss": ("55QNED86A6A", "LG TV SSCR2", "LCD"),
+            "lcd.ccss": ("LG TV SSCR2 (i1 Pro 2)", "LG TV SSCR2", "LCD PFS Phosphor"),
+        }
+        for name, (descriptor, display, technology) in files.items():
+            (directory / name).write_text(f'CCSS\nDESCRIPTOR "{descriptor}"\nDISPLAY "{display}"\n'
+                                          f'TECHNOLOGY "{technology}"\n')
+        scores = {name: ccss_score(directory / name, "OLED55G26LA") for name in files}
+        self.assertEqual(scores, {"six.ccss": 3, "c1.ccss": 3, "c2.ccss": 5, "g2.ccss": 8,
+                                  "qned.ccss": 0, "lcd.ccss": 0})
+        bundled = HERE.parent / "ccss" / "LG TV 55G2 (i1 Pro 2).ccss"
+        self.assertEqual(ccss_score(bundled, "OLED55G26LA"), 10)
+        self.assertEqual(ccss_score(bundled, "OLED65G26LA"), 8)
+        self.assertEqual(ccss_score(bundled, "OLED65C14LA"), 3)
+        from lgcal import setup
+        with mock.patch.object(setup, "ccss_dirs", return_value=[directory, bundled.parent]):
+            self.assertEqual(Path(setup.find_ccss({}, "OLED55G26LA")).name, bundled.name)
+            self.assertEqual(Path(setup.find_ccss({}, "")).name, "c1.ccss")
 
 
 class Pattern:

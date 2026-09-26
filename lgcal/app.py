@@ -26,7 +26,7 @@ from .meter import Meter
 from .patterns import PatternWindow
 from .prepare import clear_calibration, prepare
 from .server import Api, MeterService, make_server
-from .setup import find_argyll, find_ccss, find_perl, meter_command, perl_runtime_env
+from .setup import ccss_score, find_argyll, find_ccss, find_perl, meter_command, perl_runtime_env
 from .signal import Reader, detect_range, measure_white, verify, wait_for_meter
 from .dark import extend_dark_end
 from .steps import METER_FLOOR, PICTURE_MODES, build_config
@@ -353,8 +353,12 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
             pattern = open_pattern_window(session, argyll, owned)
         if meter is None:
             argyll = find_argyll(settings, say)
-            ccss = find_ccss(settings)
-            say(f"Meter correction: {Path(ccss).name}" if ccss else
+            model = lg.load_clients().get("model_name") or ""
+            ccss = find_ccss(settings, model)
+            fit = ccss_score(Path(ccss), model) if ccss else 0
+            say(f"Meter correction: {Path(ccss).name}" + (
+                f" (measured on this model)" if fit >= 8 else " (same model year)" if fit == 5 else
+                f" (a general WOLED one; none made for {model or 'this model'} was found)") if ccss else
                 "No WOLED meter correction (.ccss) found; readings use the meter's default. "
                 "Drop one into the 'ccss' folder to use it.")
             say("Starting the meter ...")
