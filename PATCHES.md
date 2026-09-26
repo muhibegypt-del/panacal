@@ -28,7 +28,7 @@ The calibration logic is the author's: targets, the solver, the 1D LUT build, th
 |---|---|---|
 | `$api_host`, `$api_port` | `PGEN_API_HOST` / `PGEN_API_PORT` | Same as the greyscale worker. |
 
-Nothing else is changed. On Windows the worker takes its own portable paths: it cannot read `/proc/cpuinfo`, so it builds the LUT on one thread (no `fork`), and the launcher sets the worker's own `PGEN_AUTOCAL_LUT_NATIVE=0` so it uses its Perl solver instead of the Pi's compiled `pgen_lut_solve` (the worker's comment: "a slow cube is always correct"). `lg.py` ports the `3d-lut/probe` and `3d-lut/upload` routes from `lg.pm`; an upload must name a payload the worker wrote into the run's `luts` folder.
+Nothing else is changed. On Windows the worker takes its own portable paths: it cannot read `/proc/cpuinfo`, so it builds the LUT on one thread (no `fork`), and the launcher sets the worker's own `PGEN_AUTOCAL_LUT_NATIVE=0` so it uses its Perl solver instead of the Pi's compiled `pgen_lut_solve` (the worker's comment: "a slow cube is always correct"). `lg.py` ports the `3d-lut/probe` and `3d-lut/upload` routes from `lg.pm`; an upload must name a payload the worker wrote into the run's `luts` folder. For HDR it also ports `hdr-calman-reset` and `hdr-tone-map/upload`.
 
 ## Bug fix in the worker (`PC-PORT FIX`)
 
@@ -66,5 +66,6 @@ Upstream maps legal black (code 16) to 128 instead of 64. That puts every entry 
 | WebUI routes in `webui.pm` / `lg.pm` | `server.py` and `lg.py`: the same routes and the same helper requests, timeouts, `clients.json` bookkeeping and held-calibration-mode rules as `lg.pm`. |
 | Dashboard wizard | `app.py` and `steps.py`: the same request body and 26-point step list the dashboard sends (SDR RGB, 8-bit, full or limited range). |
 | Wizard reset before AutoCal (`meterAutoCalResetDdc`) | `prepare.py`: picture-mode reset, verified DDC/1D LUT baseline reset and SDR reference reset, in the wizard's order with its 3 attempts; the OLED brightness read beforehand is written back (the wizard has the user dial it). `lg.py` ports the `picture-settings/reset` and `sdr-calman-reset` routes. |
+| PGenerator's HDR10 output (HDR InfoFrame, 10-bit) | madTPG (`madtpg.py`), driven through madHcNet64.dll as DisplayCAL does; the worker's 10-bit codes are passed through as 0..1 values. |
 | CEC, mDNS and TV scan in `lg.pm` | `discover.py`: SSDP, then a sweep of the local subnet. Every candidate is confirmed with the helper's `probe`. |
 | Stale-session cleanup in `lg.pm` | `LG.clear_stale_calibration_mode`: CAL_END before a run if an earlier run died while holding calibration mode. |

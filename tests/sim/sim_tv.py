@@ -96,6 +96,15 @@ def sample_index_f(code: float, black_level: str = "high", gpu_range: str = "ful
     return float(indexes[-1])
 
 
+def pq_nits(signal: float) -> float:
+    m1, m2 = 2610 / 16384, 2523 / 4096 * 128
+    c1, c2, c3 = 3424 / 4096, 2413 / 4096 * 32, 2392 / 4096 * 32
+    if signal <= 0:
+        return 0.0
+    p = signal ** (1 / m2)
+    return 10000 * (max(p - c1, 0.0) / (c2 - c3 * p)) ** (1 / m1)
+
+
 class Lut3D:
     """An LG 33x33x33 12-bit 3D LUT (R fastest, G, B slowest), trilinear."""
 
@@ -161,6 +170,12 @@ class Panel:
         # reset replaces it with identity, leaving the native primaries.
         self.gamut = M709
         self.lut: Lut3D | None = None
+        # HDR: in LG's calibration mode the TV shows the signal on a 2.2
+        # curve against its peak (what the HDR20 path calibrates); outside
+        # it, PQ through the tone map for tone_peak.
+        self.hdr = False
+        self.calibrating = False
+        self.tone_peak = peak
         self.reference = identity(sample_index(255))  # legal white 940
         self.lock = threading.Lock()
 
@@ -185,18 +200,48 @@ class Panel:
             gamut = self.gamut
         return tuple(self.peak * sum(gamut[row][c] * light[c] for c in range(3)) for row in range(3))
 
+    def xyz_hdr(self, signal: tuple[float, float, float]) -> tuple[float, float, float]:
+        """An HDR10 signal (0..1 per channel) on the panel."""
+        with self.lock:
+            v = tuple(signal)
+            if not self.calibrating:
+                # PQ -> relative to the tone-map peak (hard clip), onto the
+                # 2.2 panel curve that calibration mode passes straight through.
+                v = tuple(min(1.0, pq_nits(c) / self.tone_peak) ** (1 / 2.2) for c in v)
+            # The 3D LUT and 1D LUT act on that panel-referred signal, which is
+            # what the colour worker profiles in calibration mode (its model
+            # uses the greyscale's 2.2 curve).
+            if self.lut is not None:
+                v = self.lut.apply(v)
+            light = []
+            for channel, c in enumerate(v):
+                drive = max(0.0, self.table_value(channel, min(1023.0, c * 1023)) / identity(1023))
+                light.append(self.gains[channel] * drive ** self.gammas[channel])
+            gamut = self.gamut
+        return tuple(self.peak * sum(gamut[row][c] * light[c] for c in range(3)) for row in range(3))
+
     def upload(self, data: list[int]) -> None:
         with self.lock:
             self.dpg = [[float(v) for v in data[c * 1024:(c + 1) * 1024]] for c in range(3)]
 
 
 class SimPattern:
-    def __init__(self):
+    def __init__(self, hdr: bool = False):
         self.rgb = (0, 0, 0)
+        self.signal = (0.0, 0.0, 0.0)
         self.shown = 0
+        if hdr:
+            self.show_code = self._show_code      # madTPG keeps 10-bit codes
 
     def show(self, r: int, g: int, b: int, area: float) -> None:
         self.rgb = (r, g, b)
+        self.signal = (r / 255, g / 255, b / 255)
+        self.shown += 1
+
+    def _show_code(self, r: float, g: float, b: float, input_max: int, area: float) -> None:
+        top = float(input_max or 255)
+        self.signal = (r / top, g / top, b / top)
+        self.rgb = tuple(round(v * 255) for v in self.signal)
         self.shown += 1
 
     def close(self) -> None:
@@ -214,7 +259,8 @@ class SimMeter:
 
     def read(self) -> tuple[float, float, float]:
         self.reads += 1
-        X, Y, Z = self.panel.xyz(self.pattern.rgb)
+        X, Y, Z = (self.panel.xyz_hdr(self.pattern.signal) if self.panel.hdr
+                   else self.panel.xyz(self.pattern.rgb))
         # A colorimeter's repeatability is mostly common to all three
         # channels (luminance); the chromaticity is much steadier.
         common = 1 + self.random.gauss(0, 0.003)
@@ -267,6 +313,16 @@ class SimTV:
         self.requests: list[str] = []
         self.uploads = 0
         self.lut_uploads = 0
+        self.tone_maps = 0
+
+    @property
+    def calibration_mode(self) -> bool:
+        return self._calibration_mode
+
+    @calibration_mode.setter
+    def calibration_mode(self, value: bool) -> None:
+        self._calibration_mode = bool(value)
+        self.panel.calibrating = bool(value)
 
     def settings(self) -> dict:
         return {"pictureMode": self.picture_mode, "whiteBalanceMethod": "22", "whiteBalanceIre": "100",
@@ -330,6 +386,25 @@ class SimTV:
             self.neutral()
             self.set_backlight(self.FACTORY_BACKLIGHT)
             return {**ok, "picture_settings": self.settings(), "message": "picture mode reset"}
+        if action == "hdr_calman_reset":
+            self.neutral()
+            self.panel.gamut = M_NATIVE
+            self.panel.lut = None
+            self.panel.tone_peak = self.base_peak          # factory tone map
+            self.calibration_mode = False
+            return {**ok, "hdr_calman_reset": True, "ddc_1d_lut": True, "ddc_baseline_reset": True,
+                    "ddc_reset_verified": True, "message": "HDR reference reset"}
+        if action == "hdr_tone_map_upload":
+            data = request.get("dpg_data")
+            if isinstance(data, list) and len(data) == 3072:
+                self.panel.upload(data)
+                self.uploads += 1
+            self.panel.tone_peak = float(request.get("peak_luminance") or self.base_peak)
+            self.tone_maps += 1
+            self.calibration_mode = False                  # the tone map always ends with CAL_END
+            return {**ok, "uploaded": True, "message": "HDR tone map uploaded",
+                    "cal_start_response": {"type": "response"}, "cal_end_response": {"type": "response"},
+                    "active_picture_mode": mode, "calibration_picture_mode": mode}
         if action == "sdr_calman_reset":
             self.neutral()
             self.panel.gamut = M_NATIVE      # identity 3x3: the factory BT.709 mapping is gone

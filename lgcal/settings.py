@@ -15,7 +15,7 @@ from .steps import PICTURE_MODES, TARGET_GAMMAS
 
 DEFAULTS = {"target_gamma": "bt1886", "target_delta_e": 0.5, "patch_size": 10, "api_port": 8765,
             "reset_picture_mode": True, "picture_mode": "", "tv_ip": "", "perl": "", "argyll_bin": "",
-            "pattern_insertion": True, "meter": {}}
+            "pattern_insertion": True, "madvr": "", "meter": {}}
 METER_DEFAULTS = {"ccss": "", "spotread": "", "args": ["-e"], "display_type": "oled", "synthetic_black": True,
                   "floor_cd_m2": 0.3}
 IGNORED = {"_comment"}
@@ -94,6 +94,7 @@ def validate(raw) -> tuple[dict, list[str]]:
     out["tv_ip"] = ip
     out["perl"] = _path(merged["perl"], "perl", errors)
     out["argyll_bin"] = _path(merged["argyll_bin"], "argyll_bin", errors, directory=True)
+    out["madvr"] = _path(merged["madvr"], "madvr", errors, directory=True)
 
     meter_raw = merged["meter"]
     if not isinstance(meter_raw, dict):

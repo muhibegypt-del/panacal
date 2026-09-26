@@ -583,6 +583,62 @@ class LG:
             self.update_connect_metadata(result, clients.get("manual_ip") or ip)
         return result
 
+    def hdr_calman_reset(self, payload: dict) -> dict:
+        """lg.pm webui_lg_hdr_calman_reset: the HDR counterpart (identity
+        BT.2020 3D LUT, 1D LUT and 3x3 matrix, tone map cleared)."""
+        ready, error = self._ready(payload, "resetting HDR calibration state")
+        if error:
+            return error
+        clients, ip, key = ready
+        picture_mode = payload.get("picture_mode") or clients.get("calibration_picture_mode") or ""
+        stale = self.clear_stale_calibration_mode()
+        if stale is not None and stale.get("status") != "ok":
+            return stale
+        result = self.run_helper({
+            "action": "hdr_calman_reset", "ip": ip, "client_key": key, "picture_mode": picture_mode,
+            "ddc_layout": payload.get("ddc_layout") or "hdr20",
+            "helper_timeout": int(payload.get("helper_timeout") or 0), "connect_timeout": 5,
+        })
+        self.record_calibration_mode_result(self.load_clients(), result, False, picture_mode)
+        if result.get("status") == "ok":
+            self.update_connect_metadata(result, clients.get("manual_ip") or ip)
+        return result
+
+    def hdr_tone_map_upload(self, payload: dict) -> dict:
+        """lg.pm webui_lg_hdr_tone_map_upload: LG's HDR tone map for the
+        measured peak, with the 1D LUT in the same calibration session."""
+        try:
+            peak = float(payload.get("peak_luminance") or 0)
+        except (TypeError, ValueError):
+            peak = 0.0
+        if peak <= 0:
+            return {"status": "error", "message": "HDR tone-map upload requires a measured peak luminance."}
+        data = payload.get("dpg_data")
+        if data is not None and (not isinstance(data, list) or len(data) != 3072):
+            return {"status": "error", "expected_count": 3072,
+                    "received_count": len(data) if isinstance(data, list) else -1,
+                    "message": "HDR20 1D DPG upload requires a 3072-value (3 channels x 1024 points) uint16 array."}
+        ready, error = self._ready(payload, "uploading HDR tone-map data")
+        if error:
+            return error
+        clients, ip, key = ready
+        picture_mode = payload.get("picture_mode") or clients.get("calibration_picture_mode") or ""
+        request = {"action": "hdr_tone_map_upload", "ip": ip, "client_key": key, "picture_mode": picture_mode,
+                   "peak_luminance": peak, "ddc_layout": "hdr20",
+                   "keep_calibration_mode": 1 if payload.get("keep_calibration_mode") else 0,
+                   "calibration_mode_active": 1 if payload.get("calibration_mode_active") else 0,
+                   "helper_timeout": int(payload.get("helper_timeout") or 0), "connect_timeout": 5}
+        if data is not None:
+            request["dpg_data"] = [max(0, min(65535, int(float(v)))) for v in data]
+        result = self.run_helper(request)
+        self.record_calibration_mode_result(self.load_clients(), result, False, picture_mode)
+        if result.get("status") == "ok":
+            self.update_connect_metadata(result, clients.get("manual_ip") or ip)
+        if self.needs_repair(result):
+            result["message"] = ("The saved LG client key does not have calibration permission. "
+                                 "Pair again with 'Pair LG TV.bat', then rerun.")
+        return result
+
     def clear_stale_calibration_mode(self) -> dict | None:
         """lg.pm lg_clear_stale_calibration_mode_for_reset: a run that died
         (power cut, closed window) leaves calibration mode held on the TV.

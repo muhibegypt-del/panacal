@@ -56,20 +56,25 @@ def fit_exponent(points: list[tuple[int, float]]) -> float:
     return min(EXPONENT_RANGE[1], max(EXPONENT_RANGE[0], slope))
 
 
-def extend_dark_end(dpg: list, threshold: float, limited: bool = False) -> tuple[list[int], dict]:
+def extend_dark_end(dpg: list, threshold: float, limited: bool = False, index_for=None,
+                    ladder=FIT_LADDER) -> tuple[list[int], dict]:
     """Return (table, report) with every index below the threshold slot's
-    index rebuilt from the calibrated values at and above it."""
+    index rebuilt from the calibrated values at and above it. index_for
+    maps a ladder slot to its table index (default: the SDR ladder)."""
     if not isinstance(dpg, list) or len(dpg) != 3072:
         raise ValueError("a 1D DPG table has 3072 values")
-    fit_slots = [s for s in FIT_LADDER if s >= threshold][:FIT_POINTS]
+    fit_slots = [s for s in ladder if s >= threshold][:FIT_POINTS]
     if len(fit_slots) < 2:
         raise ValueError(f"no calibrated levels above {threshold}% to extend from")
-    base = sample_index(fit_slots[0], limited)
+    if index_for is None:
+        def index_for(slot):
+            return sample_index(slot, limited)
+    base = index_for(fit_slots[0])
     out = [int(v) for v in dpg]
     report = {"threshold": threshold, "from_index": base, "fit_slots": fit_slots, "exponents": []}
     for channel in range(3):
         table = out[channel * 1024:(channel + 1) * 1024]
-        points = [(sample_index(s, limited), float(table[sample_index(s, limited)])) for s in fit_slots]
+        points = [(index_for(s), float(table[index_for(s)])) for s in fit_slots]
         k = fit_exponent(points)
         report["exponents"].append(round(k, 4))
         top = table[base]

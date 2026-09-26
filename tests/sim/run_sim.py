@@ -43,7 +43,7 @@ FAST = {
 def simulate(session_dir: Path, settings: dict | None = None, *, black_level: str = "high",
              gpu_range: str = "full", tv_mode: str = "expert2", stale_calibration: bool = False,
              reset: bool = True, peak: float = 150.0, meter_class=None, stages=("greyscale", "colour"),
-             panel=None, tv=None):
+             panel=None, tv=None, hdr: bool = False):
     """Returns (exit code, worker state, SimTV, SimMeter, console text)."""
     data_dir = Path(tempfile.mkdtemp(prefix="lgcal-sim-data-"))
     saved_data_dir = app.DATA_DIR
@@ -58,8 +58,12 @@ def simulate(session_dir: Path, settings: dict | None = None, *, black_level: st
     panel = tv.panel
     tv.picture_mode = tv_mode
     tv.calibration_mode = stale_calibration
+    if hdr:
+        panel.hdr = True
+        tv.picture_mode = tv_mode if tv_mode.startswith("hdr") else "hdrCinema"
+        stages = ("hdr",)
     server = serve(tv)
-    pattern = SimPattern()
+    pattern = SimPattern(hdr=hdr)
     meter = (meter_class or SimMeter)(panel, pattern)
     settings = {**app.DEFAULTS, "api_port": 18765, **(settings or {})}
     console = io.StringIO()

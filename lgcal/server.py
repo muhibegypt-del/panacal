@@ -51,8 +51,12 @@ class MeterService:
 
     def show(self, r: int, g: int, b: int, input_max: int, size: int) -> None:
         with self.pattern_lock:
-            self.pattern.show(to_8bit(r, input_max), to_8bit(g, input_max), to_8bit(b, input_max),
-                              window_area(size))
+            if hasattr(self.pattern, "show_code"):
+                # madTPG keeps the worker's 10-bit codes (HDR runs).
+                self.pattern.show_code(r, g, b, input_max, window_area(size))
+            else:
+                self.pattern.show(to_8bit(r, input_max), to_8bit(g, input_max), to_8bit(b, input_max),
+                                  window_area(size))
 
     def pattern_route(self, payload: dict) -> dict:
         name = payload.get("name") or "patch"
@@ -138,6 +142,13 @@ class Api:
             payload = {**payload, "dpg_data": self.final_dpg(payload["dpg_data"])}
         return self.lg.dpg_upload(payload)
 
+    def hdr_tone_map_upload(self, payload: dict) -> dict:
+        """The HDR run's final commit (the colour worker binds the greyscale
+        table and the tone map in one session): same dark-end hook."""
+        if self.final_dpg is not None and isinstance(payload.get("dpg_data"), list):
+            payload = {**payload, "dpg_data": self.final_dpg(payload["dpg_data"])}
+        return self.lg.hdr_tone_map_upload(payload)
+
     def handle(self, method: str, path: str, payload: dict) -> dict:
         path = path.split("?", 1)[0]
         routes = {
@@ -154,6 +165,8 @@ class Api:
             ("POST", "/api/lg/3d-lut/reset"): self.lg.lut3d_reset,
             ("POST", "/api/lg/3d-lut/probe"): self.lg.lut3d_probe,
             ("POST", "/api/lg/3d-lut/upload"): self.lg.lut3d_upload,
+            ("POST", "/api/lg/hdr-calman-reset"): self.lg.hdr_calman_reset,
+            ("POST", "/api/lg/hdr-tone-map/upload"): self.hdr_tone_map_upload,
         }
         handler = routes.get((method, path))
         if handler is None:

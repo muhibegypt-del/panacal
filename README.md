@@ -31,6 +31,16 @@ Whenever a run stops, the last lines say why, what state the TV was left in (unt
 
 **LG Colour AutoCal.bat** runs only the colour stage on the picture mode the TV is in. It finds that mode's last finished greyscale calibration in `sessions\`, keeps it, and commits it again at the end.
 
+**LG HDR AutoCal.bat** calibrates an HDR10 picture mode (Cinema, Cinema Home, Filmmaker, Game Optimizer). It runs the author's HDR flow:
+
+| Step | What it does |
+|---|---|
+| Patterns | A Windows window cannot send HDR10, so patterns come from madTPG, madVR's free test pattern generator (the one DisplayCAL, HCFR and Calman use). It is downloaded into `tools\madVR` the first time. madTPG's HDR mode is a button in its window: the run asks for one click and continues when the TV reports an HDR picture mode. |
+| Reset | The HDR reference reset: identity 1D LUT, BT.2020 3D LUT and matrix, factory tone map. |
+| Greyscale | The worker's HDR path: 20 levels from 100% down to 1.4%, each on a 2.2 curve against the measured peak while the TV is held in LG's calibration pass-through. Levels dimmer than the meter floor on that curve (with a Spyder5 on a ~700 cd/m2 G2: below 4%) follow the curve calibrated above them. |
+| Colour and tone map | The colour worker's HDR matrix run inherits that calibration session, uploads the BT.2020 3D LUT, then LG's tone map for the measured peak together with the greyscale table, and ends calibration mode. |
+| Verify | PQ greyscale from 5% to 70% signal against ST 2084, and BT.709 colours inside the BT.2020 container on a 100 cd/m2 white, in dE ITP. Levels above half the peak are tone-mapped by the TV and shown, not scored. |
+
 **Undo LG AutoCal.bat** clears the current picture mode's white balance and LUTs. It does not bring back LG's factory colours; run LG AutoCal afterwards.
 
 Each run keeps everything in `sessions\<date_time>\`: `console.txt` (what the window showed), every reading and TV request, the worker's log and state, and `verification.json`.
@@ -47,12 +57,13 @@ Copy `settings.example.json` to `settings.json` only to change a default. The fi
 | `tv_ip` | found automatically | For networks where discovery is blocked. |
 | `patch_size` | `10` | Patch window as a percentage of screen area. |
 | `meter.ccss` | found automatically | A specific correction file. |
+| `madvr` | found or downloaded | A madVR folder (with `madTPG.exe`) to use for HDR patterns. |
 | `meter.floor_cd_m2` | `0.3` | Dimmest level the meter is trusted to steer. Lower it for an i1Display Pro (about `0.01`); `0` lets the worker calibrate every level. |
 | `reset_picture_mode` | `true` | `false` keeps your other picture settings; the white balance and LUTs are still cleared first. |
 
 ## Scope
 
-- SDR only. HDR10 and Dolby Vision need HDR signalling and 10-bit patterns, which a Windows desktop window cannot produce.
+- HDR10 needs madTPG (above). Dolby Vision is not included.
 - Colour uses the author's `matrix` method (5 patches). His finer methods (ramp, lattice, skeleton) are not wired in.
 - Patches are 8-bit RGB. This is the worker's 8-bit path. On that path the worker turns off its OLED pattern insertion (grey flashes between readings); it uses insertion only with 10-bit patterns.
 
