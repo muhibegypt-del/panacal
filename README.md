@@ -45,6 +45,19 @@ Whenever a run stops, the last lines say why, what state the TV was left in (unt
 
 Each run keeps everything in `sessions\<date_time>\`: `console.txt` (what the window showed), every reading and TV request, the worker's log and state, and `verification.json`.
 
+## CRT Low Slider (iiyama Vision Master Pro 514)
+
+**CRT Low Slider.bat** is a separate tool for a CRT whose cutoffs have drifted (dark greys tinted, the tint fading towards white). It gives the missing per-gun bias controls in software: Red, Green and Blue low sliders that shift each channel near black through the graphics card's gamma ramp.
+
+- Black and white never move; each slider is limited to ±16 of 255 levels.
+- **Reach** sets how far up the trim extends (1 behaves like an analogue bias control; higher keeps it to the shadows). **Ramp-in** is how gently it starts above black.
+- Banding guard: the curve's steepness is kept between 0.6× and 1.7×. If a trim would bunch levels up near black, the ramp-in is widened automatically. The meter shows, per channel, how many 8-bit levels are merged and the largest step. A 10-bit output or GPU dithering uses the ramp's 16-bit values in full.
+- **Test pattern** shows 0–20% in 1% steps (for tint) and a smooth 0–40% ramp (for banding) on the chosen display. Esc closes it.
+- Nothing is kept until **Save**. Closing without saving puts the display back. While the window is open, a ramp reset by other software (a profile loader, the driver) is put back. **Apply at login** re-applies the saved trims after a restart.
+- `crt_low_slider.py --reset` puts a linear ramp back on every display.
+
+Fix white first with the monitor's own Red/Blue controls, then measure the greyscale (15–30% matter most) and move the slider of the strongest channel down and the weakest up until the RGB balance lines meet. The NVIDIA/AMD colour settings must be left at "other applications control color", or the driver overrides the ramp.
+
 ## Optional overrides
 
 Copy `settings.example.json` to `settings.json` only to change a default. The file is checked before anything starts: every wrong value is listed at once, and a misspelt setting name is pointed out rather than ignored.
