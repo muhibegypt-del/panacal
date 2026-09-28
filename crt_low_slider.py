@@ -206,7 +206,9 @@ class Displays:
         return ""
 
     def _dc(self, device: str):
-        dc = self.gdi32.CreateDCW("DISPLAY", device, None, None)
+        # The display's own name as the driver argument gives a DC for that
+        # display; ("DISPLAY", name) can give the main display's DC instead.
+        dc = self.gdi32.CreateDCW(device, None, None, None)
         if not dc:
             raise OSError(f"cannot open {device}")
         return dc
@@ -378,10 +380,18 @@ def run_window(displays: Displays) -> int:
                          f"  steepness {r['min_slope']:.2f}-{r['max_slope']:.2f}  {flag}"
                          + (f"  (ramp-in widened to {r['knee'] * 100:.1f}%)" if r["widened"] else ""))
         meter.config(text="\n".join(lines))
-        if ok:
+        target = f'{state["monitor"]["name"] or device} ({device})'
+        if ok and not same(displays.get(device), ramp):
+            status.config(text=f"Windows accepted the curve for {target}, but the display's ramp reads back "
+                               "unchanged, so the graphics driver is ignoring it. Check: NVIDIA/AMD colour "
+                               "settings on 'other applications control colour'; Windows HDR and Auto colour "
+                               "management off for this display; not a DisplayLink/USB display adapter.",
+                          foreground="red")
+        elif ok:
             state["refused"] = False
-            status.config(text="Applied. Measure, adjust, repeat. Save keeps it; closing without "
-                               "saving puts the display back.", foreground="")
+            status.config(text=f"Applied to {target}. Measure, adjust, repeat. Save keeps it; closing "
+                               "without saving puts the display back. 'Identify' flashes the display "
+                               "being adjusted.", foreground="")
             allow.pack_forget()
         else:
             state["refused"] = True
@@ -444,6 +454,18 @@ def run_window(displays: Displays) -> int:
         top.bind("<Button-1>", lambda _e: top.destroy())
         top.focus_force()
 
+    def identify() -> None:
+        """Tint the chosen display magenta for a moment, to show which one the
+        sliders act on and that the driver applies the ramp."""
+        device = state["monitor"]["device"]
+        remember_original(device)
+        flash = identity()
+        flash[1] = [round(v * 0.6) for v in flash[1]]
+        if not displays.set(device, flash):
+            status.config(text="Windows refused even the test tint for this display.", foreground="red")
+            return
+        root.after(1500, apply)
+
     def watchdog() -> None:
         device = state["monitor"]["device"]
         if state["ramp"] is not None and not state["pending"]:
@@ -470,6 +492,7 @@ def run_window(displays: Displays) -> int:
                 displays.set(device, original)
         root.destroy()
 
+    ttk.Button(buttons, text="Identify", command=identify).pack(side="left", padx=4)
     ttk.Button(buttons, text="Test pattern", command=pattern).pack(side="left", padx=4)
     ttk.Button(buttons, text="Reset to zero", command=reset).pack(side="left", padx=4)
     ttk.Button(buttons, text="Save", command=save).pack(side="left", padx=4)
