@@ -24,6 +24,7 @@ Guard rails:
     CRT Low Slider.bat            the window
     crt_low_slider.py --apply     apply the saved trims (for login)
     crt_low_slider.py --reset     put a linear ramp on every display
+    crt_low_slider.py --diagnose  test tint on each display, report what happened
 """
 from __future__ import annotations
 
@@ -296,6 +297,47 @@ def reset_all(displays: Displays) -> int:
     return 0
 
 
+def diagnose(displays: Displays) -> int:
+    """Try a visible test tint on every display and write what Windows and
+    the driver did with it to crt_low_diagnose.txt."""
+    import ctypes
+    import platform
+    lines = [f"Windows {platform.version()} ({platform.release()}), Python {platform.python_version()}"]
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM") as key:
+            lines.append(f"GdiIcmGammaRange = {winreg.QueryValueEx(key, 'GdiIcmGammaRange')[0]}")
+    except OSError:
+        lines.append("GdiIcmGammaRange not set (Windows default limits)")
+    tint = identity()
+    tint[1] = [round(v * 0.6) for v in tint[1]]
+    for m in displays.monitors():
+        lines.append("")
+        lines.append(f'{m["device"]}  "{m["name"]}"  primary={m["primary"]}  rect={m["rect"]}')
+        try:
+            before = displays.get(m["device"])
+            lines.append("  read ramp: " + ("failed" if before is None else
+                                            "linear" if same(before, identity(), 64) else
+                                            f"NOT linear (green at 50%: {before[1][128]} of {128 * 257})"))
+            accepted = displays.set(m["device"], tint)
+            after = displays.get(m["device"])
+            lines.append(f"  test tint accepted by Windows: {accepted}")
+            lines.append("  reads back as the test tint: " + str(same(after, tint)))
+            time.sleep(2)
+            later = displays.get(m["device"])
+            lines.append("  still the test tint 2 s later: " + str(same(later, tint)))
+            displays.set(m["device"], before or identity())
+        except OSError as exc:
+            lines.append(f"  error: {exc}")
+    report = HERE / "crt_low_diagnose.txt"
+    report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ctypes.windll.user32.MessageBoxW(
+        None, "Each display was tinted magenta for 2 seconds, one after another.\n\n"
+              + "\n".join(lines) + f"\n\nSaved to {report}", "CRT Low Slider diagnosis", 0x40)
+    return 0
+
+
 # --- the window ---------------------------------------------------------------
 
 def run_window(displays: Displays) -> int:
@@ -523,6 +565,8 @@ def main(argv: list[str]) -> int:
             return apply_saved(displays)
         if "--reset" in argv:
             return reset_all(displays)
+        if "--diagnose" in argv:
+            return diagnose(displays)
         return run_window(displays)
     except Exception:                  # runs windowless (pythonw): say what went wrong
         import ctypes
