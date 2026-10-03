@@ -1,6 +1,8 @@
 """Hardware-free checks. Run with: python -m unittest discover -s tests -t . -v"""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import shutil
 import socket
@@ -296,6 +298,17 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(json.loads((app.DATA_DIR / "clients.json").read_text())["client_key"], KEY)
         self.assertIn("ssap://pairing/setPin", self.tv.log)
         app.find_tv(lg, settings, pin_input=lambda _p: self.fail("asked for a PIN again"))
+
+    def test_service_menu_opens_through_the_real_helper(self):
+        from tests.fake_webos import PIN
+        lg = LG(PERL, app.HELPER, app.DATA_DIR, lambda _m: None, app.perl_env(None, None))
+        app.find_tv(lg, {"tv_ip": "127.0.0.1"}, pin_input=lambda _p: PIN)
+        for answer, key in (("1", "inStart"), ("2", "ezAdjust")):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                app.open_service_menu(lg, ask_input=lambda _p: answer)
+            self.assertEqual(self.tv.payloads["ssap://system.launcher/launch"],
+                             {"id": "com.webos.app.factorywin", "params": {"id": "executeFactory", "irKey": key}})
+            self.assertIn("0413", out.getvalue())
 
 
 def find_powershell() -> str:

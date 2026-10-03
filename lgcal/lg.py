@@ -658,6 +658,16 @@ class LG:
         settings = result.get("picture_settings") if isinstance(result.get("picture_settings"), dict) else {}
         return str(settings.get("pictureMode") or "")
 
+    def service_menu(self, menu: str) -> dict:
+        """Open LG's In-Start ("instart") or EZ Adjust ("ezadjust") service
+        menu on the TV, as the service remote's key would."""
+        ready, error = self._ready({}, "opening the service menu")
+        if error:
+            return error
+        _clients, ip, key = ready
+        return self.run_helper({"action": "remote_control", "ip": ip, "client_key": key, "command": menu,
+                                "connect_timeout": 5})
+
     # --- pairing (used by the launcher) ------------------------------------
     def probe(self, ip: str) -> dict:
         return self.run_helper({"action": "probe", "ip": ip, "connect_timeout": 5})

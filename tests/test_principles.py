@@ -435,6 +435,15 @@ class Cleanup(unittest.TestCase):
         self.assertNotIn("first time only", out)
         self.assertFalse(pin.exists())
 
+    def test_a_refused_service_menu_says_why(self):
+        class FakeLG:
+            def service_menu(self, menu):
+                return {"status": "error", "message": "401 insufficient permissions"}
+        with self.assertRaises(SystemExit) as stop:
+            quiet(app.open_service_menu, FakeLG(), lambda _p: "1")
+        self.assertIn("In-Start", str(stop.exception))
+        self.assertIn("Pair LG TV.bat", str(stop.exception))
+
     def test_every_bat_the_messages_name_exists(self):
         import re
         root = Path(__file__).resolve().parent.parent

@@ -829,12 +829,33 @@ def report(state: dict, worker_log: Path) -> bool:
     return True
 
 
+SERVICE_MENUS = (("instart", "In-Start (most service settings)"), ("ezadjust", "EZ Adjust"))
+
+
+def open_service_menu(lg: LG, ask_input=input) -> None:
+    """Open a service menu on the TV; the adjustments are made by hand."""
+    for number, (_key, name) in enumerate(SERVICE_MENUS, 1):
+        say(f"  {number}. {name}")
+    menu, name = SERVICE_MENUS[choose_number("Which service menu? Type its number: ", len(SERVICE_MENUS),
+                                             ask_input)]
+    result = lg.service_menu(menu)
+    if result.get("status") != "ok":
+        raise SystemExit(f"The TV did not open the {name} menu ({result.get('message') or 'no answer'}). "
+                         "If it says the key has no permission, run 'Pair LG TV.bat' first.")
+    say(f"The {name} menu is open on the TV. If it asks for a password, type 0413 with the remote.")
+    say("Before changing anything, photograph or write down each value you touch: LG AutoCal and Undo "
+        "do not put service menu settings back, and a wrong value can damage the panel or void the warranty.")
+    say("Move with the arrow keys and OK; Back or Exit closes the menu.")
+
+
 def pair_or_undo(settings: dict, command: str) -> int:
     with Session(suffix="_" + command) as session:
         try:
             perl = find_perl(settings, say)
             lg = LG(perl, HELPER, DATA_DIR, session.log, perl_env(None, None, HELPER, perl))
             find_tv(lg, settings, force_pairing=command == "pair")
+            if command == "service":
+                open_service_menu(lg)
             if command == "undo":
                 lg.clear_stale_calibration_mode()
                 mode = choose_picture_mode(lg, settings)
@@ -857,15 +878,16 @@ def pair_or_undo(settings: dict, command: str) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="LG OLED AutoCal on a PC (PGenerator-Plus worker)")
-    parser.add_argument("command", nargs="?", default="run", choices=["run", "colour", "hdr", "pair", "undo"],
+    parser.add_argument("command", nargs="?", default="run", choices=["run", "colour", "hdr", "pair", "undo", "service"],
                         help="run (default): greyscale then colour; colour: only the colour stage, keeping "
                              "the greyscale in the TV; hdr: HDR10 greyscale and colour with madTPG patterns; "
                              "pair: find the TV and pair it again with a new PIN; "
-                             "undo: clear the mode's white balance and LUTs")
+                             "undo: clear the mode's white balance and LUTs; "
+                             "service: open the TV's service menu for adjustments by hand")
     args = parser.parse_args(argv)
     console_click_proof()
     settings = load_settings()
-    if args.command in ("pair", "undo"):
+    if args.command in ("pair", "undo", "service"):
         return pair_or_undo(settings, args.command)
     if args.command == "colour":
         return run(settings, stages=("colour",))

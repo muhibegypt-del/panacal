@@ -9,7 +9,7 @@
 | `pgen/bin/pgenerator-lg` | `usr/sbin/pgenerator-lg` (the LG webOS helper) |
 | `pgen/share/PGenerator/PGMath.pm`, `PGCalibrationMath.pm`, `PGMeterReading.pm`, `PGSignalCode.pm` | `usr/share/PGenerator/` |
 
-Commit `d71e990` imports them unmodified. Every later change is marked `PC-PORT` (portability) or `PC-PORT FIX` (one upstream bug). Run `git diff d71e990 -- pgen/` to see the full diff (35 lines added, 12 removed).
+Commit `d71e990` imports them unmodified. Every later change is marked `PC-PORT` (portability, plus one added helper command) or `PC-PORT FIX` (one upstream bug). Run `git diff d71e990 -- pgen/` to see the full diff (38 lines added, 12 removed).
 
 The calibration logic is the author's: targets, the solver, the 1D LUT build, the LG protocol and calibration-mode handling. The single change to it is the bug fix below. Each patch falls back to the original value when its environment variable is unset. The TLS change applies only on Windows or when `PGEN_LG_NATIVE_TLS` is set. On a Pi the files therefore behave exactly as upstream.
 
@@ -50,6 +50,7 @@ Upstream maps legal black (code 16) to 128 instead of 64. That puts every entry 
 | `$DIAG_LOG_PATH`, `$LG_DDC_DIR` | `PGEN_LG_DATA_DIR` | Data location. |
 | `lg_3d_lut_reset_workflow` | `PGEN_LG_TMP_DIR` | Temporary file location (`/tmp` does not exist on Windows). |
 | `use Scalar::Util ()` | added | Used by the `pending` check. |
+| `lg_remote_control_workflow` | Commands `instart` and `ezadjust` launch `com.webos.app.factorywin` with `{id: executeFactory, irKey: inStart / ezAdjust}` | Opens LG's service menu for **LG Service Menu.bat**, the way the service remote's key does; the same request [bscpylgtv](https://github.com/chros73/bscpylgtv) documents. Added, not a port: the other commands are untouched. |
 
 ## Left as they are
 

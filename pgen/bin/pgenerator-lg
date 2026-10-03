@@ -7036,6 +7036,9 @@ sub lg_remote_control_workflow (@) {
   $message=$next ? "LG mute sent." : "LG unmute sent.";
   $extra->{"mute"}=&json_bool($next);
   $extra->{"status_response"}=$status;
+ } elsif($command eq "instart" || $command eq "ezadjust") { # PC-PORT: open a service menu (as bscpylgtv does)
+  $response=&lg_request($session,"service_menu","system.launcher/launch",{ id => "com.webos.app.factorywin", params => { id => "executeFactory", irKey => ($command eq "ezadjust" ? "ezAdjust" : "inStart") } },$connect_timeout + 2); # PC-PORT
+  $message="LG service menu opened."; # PC-PORT
  } elsif($command eq "active" || $command eq "input" || $command eq "switch_input") {
   my ($ok,$input_id,$responses)=&lg_switch_external_input($session,$connect_timeout + 2,$target_input);
   &websocket_close($session);

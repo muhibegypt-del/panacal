@@ -75,11 +75,16 @@ class FakeWebOS:
         self.sock.bind(("127.0.0.1", port))
         self.sock.listen()
         self.log: list[str] = []
+        self.payloads: dict[str, dict] = {}     # the last payload sent to each URI
         self.running = True
         threading.Thread(target=self._accept, daemon=True).start()
 
     def close(self) -> None:
         self.running = False
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)    # wakes the blocked accept() so the port is freed
+        except OSError:
+            pass
         self.sock.close()
 
     def _accept(self) -> None:
@@ -122,6 +127,7 @@ class FakeWebOS:
     def _message(self, conn, message: dict) -> None:
         kind, uri, mid = message.get("type"), message.get("uri", ""), message.get("id")
         self.log.append(kind if kind != "request" else uri)
+        self.payloads[uri] = message.get("payload") or {}
         if kind == "hello":
             conn.sendall(frame({"type": "hello", "id": mid, "payload": {
                 "deviceOS": "webOS", "deviceType": "tv", "deviceOSReleaseVersion": "6.0.0",
@@ -147,5 +153,8 @@ class FakeWebOS:
             conn.sendall(frame({"type": "response", "id": mid, "payload": {
                 "returnValue": True, "product_name": "webOSTV 6.0", "model_name": "HE_DTV_W21O_AFABATAA",
                 "major_ver": "03", "minor_ver": "20.00", "device_id": "aa:bb:cc:dd:ee:ff"}}))
+        elif uri == "ssap://system.launcher/launch":
+            conn.sendall(frame({"type": "response", "id": mid, "payload": {
+                "returnValue": True, "id": (message.get("payload") or {}).get("id")}}))
         else:
             conn.sendall(frame({"type": "error", "id": mid, "error": "404 no such service or method"}))
