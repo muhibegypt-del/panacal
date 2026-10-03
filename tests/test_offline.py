@@ -305,7 +305,7 @@ def find_powershell() -> str:
 
 @unittest.skipUnless(find_powershell(), "needs PowerShell")
 class DisplayScriptTests(unittest.TestCase):
-    """display_setup.ps1 against a fake DisplayTool in the Panasonic-run state:
+    """display_setup.ps1 against a fake DisplayTool in the state that broke an early real-PC run:
     TV duplicated with the monitor and HDR on."""
 
     def test_extend_find_lg_hdr_off_then_restore(self):

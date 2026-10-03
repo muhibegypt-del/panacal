@@ -1,5 +1,5 @@
 // Test double for lgcal/DisplayTool.cs with the same public surface. It
-// starts in the state that broke the Panasonic run: the TV duplicated with
+// starts in the state that broke an early real-PC run: the TV duplicated with
 // the PC monitor (one shared desktop), with HDR on. Calls are appended to
 // the file named by FAKE_DISPLAY_LOG.
 using System;
