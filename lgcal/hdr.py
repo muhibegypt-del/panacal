@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import math
 import time
-from pathlib import Path
 
 from .meter import read_with_recovery, xyz_record
 from .signal import D65, delta_e_itp, xyz_from_xyy
@@ -37,6 +36,15 @@ HDR_MODE_NAMES = {"hdrCinema": "Cinema (HDR)", "hdrCinemaBright": "Cinema Home (
                   "hdrFilmMaker": "Filmmaker (HDR)", "hdrGame": "Game Optimizer (HDR)",
                   "hdrTechnicolor": "Technicolor (HDR)"}
 TARGET_GAMMA = 2.2    # the HDR20 path's calibration curve in LG's pass-through
+# The TV's own brightness processing. LG's calibration mode bypasses it, so
+# with it on, what you watch is not what was calibrated, and the check at the
+# end measures it instead of the calibration. (setting key, name on the TV,
+# values that leave the picture steady; HGIG is a fixed curve.) The author
+# turns AI Picture and Energy Saving off before his Dolby Vision measurement.
+STEADY_PICTURE = (("hdrDynamicToneMapping", "Dynamic Tone Mapping", ("off", "hgig")),
+                  ("aiPicture", "AI Picture Pro", ("off",)),
+                  ("energySaving", "Energy Saving", ("off",)))
+DTM_MENU = "Settings > Picture > Advanced Settings > Brightness > Dynamic Tone Mapping"
 
 
 def hdr_index(slot: float) -> int:
@@ -76,6 +84,62 @@ def hdr_dark_threshold(peak: float, floor: float) -> float:
         if peak * (slot / 100) ** TARGET_GAMMA >= floor:
             return float(slot)
     return float(HDR_DARK_SLOTS[-1])
+
+
+def steady_picture(lg, picture_mode: str, say, log, timeout: float = 600, clock=time.monotonic,
+                   sleep=time.sleep) -> list[str]:
+    """Turn off Dynamic Tone Mapping, AI Picture Pro and Energy Saving for
+    the HDR mode being calibrated. Returns the names of those turned off.
+    Dynamic Tone Mapping must be off: if the TV keeps it on, the user is
+    asked to switch it off and the run waits (SystemExit after timeout)."""
+    def read(keys) -> tuple[dict, dict]:
+        result = lg.picture_settings({"keys": list(keys), "picture_mode": picture_mode, "signal_mode": "hdr10",
+                                      "ignore_calibration_picture_mode": True})
+        values = result.get("picture_settings") if isinstance(result.get("picture_settings"), dict) else {}
+        return {k: str(values[k]) for k in keys if values.get(k) is not None}, result
+
+    def steady(value: str, values: tuple) -> bool:
+        return value.lower() in values
+
+    before, result = read([key for key, _name, _steady in STEADY_PICTURE])
+    log(f"HDR picture processing: {before} ({result.get('status')} {result.get('message') or ''})")
+    if result.get("status") != "ok":
+        say(f"Could not read the TV's picture settings ({result.get('message') or 'no answer'}). Check that "
+            f"Dynamic Tone Mapping is Off ({DTM_MENU}).")
+        return []
+    turned_off = []
+    for key, name, values in STEADY_PICTURE:
+        value = before.get(key)
+        if value is None or steady(value, values):
+            continue                       # not on this model, or already steady
+        written = lg.picture_settings_set({"settings": {key: "off"}, "readback_keys": [key],
+                                           "picture_mode": picture_mode, "signal_mode": "hdr10",
+                                           "keep_calibration_mode": False})
+        now = read([key])[0].get(key, value)
+        log(f"{key}: {value} -> {now} ({written.get('status')} {written.get('message') or ''})")
+        if steady(now, values):
+            turned_off.append(name)
+            continue
+        if key != "hdrDynamicToneMapping":
+            say(f"{name} is {now} and the TV would not turn it off from the PC. If the check at the end "
+                "says the picture is unsteady, turn it off on the TV.")
+            continue
+        say(f"Dynamic Tone Mapping is {now}, and the TV would not turn it off from the PC. It changes "
+            "brightness scene by scene, so the picture would not match the calibration.")
+        say(f"On the TV, open {DTM_MENU} and pick Off. The run continues by itself.")
+        started = clock()
+        while not steady(read([key])[0].get(key, now), values):
+            if clock() - started > timeout:
+                raise SystemExit(f"Dynamic Tone Mapping is still on. Set it to Off on the TV ({DTM_MENU}), "
+                                 "then run LG HDR AutoCal again. Nothing was calibrated.")
+            sleep(2)
+        say("Dynamic Tone Mapping is off.")
+    if turned_off:
+        names = ", ".join(turned_off[:-1]) + " and " + turned_off[-1] if len(turned_off) > 1 else turned_off[0]
+        say(f"Turned off {names} for this picture mode: "
+            + ("they change brightness by themselves" if len(turned_off) > 1 else "it changes brightness by itself")
+            + ", so the picture would not match the calibration.")
+    return turned_off
 
 
 def build_hdr_greyscale_config(settings: dict, peak: float, picture_mode: str, floor: float) -> dict:
@@ -139,6 +203,13 @@ M2020 = ((0.6369580, 0.1446169, 0.1688810), (0.2627002, 0.6779981, 0.0593017),
 P3_PRIMARIES = ((0.680, 0.320), (0.265, 0.690), (0.150, 0.060))
 BT709_PRIMARIES = ((0.640, 0.330), (0.300, 0.600), (0.150, 0.060))
 COLOUR_BASE_NITS = 100.0   # colour patches are checked well below any tone mapping
+# A steady TV gives the same grey twice (up and down the ladder), and light
+# adds up: cyan = green + blue. A TV adjusting the picture by itself fails one
+# or both (a G2 run that failed its check read cyan 37% short of green + blue).
+REPEAT_TOLERANCE = 0.08
+ADDITIVE_TOLERANCE = 0.12
+STEADY_FROM_NITS = 1.0     # below this a Spyder5's own repeatability is too coarse
+MIXES = (("Cyan", "Green", "Blue"), ("Magenta", "Red", "Blue"), ("Yellow", "Red", "Green"))
 
 
 def pq_decode(signal: float) -> float:
@@ -209,40 +280,77 @@ def show_signal(pattern, rgb01, area: float) -> None:
 
 def verify_hdr(pattern, meter, log, area: float, peak: float, floor: float, say, settle: float = 2.0) -> dict:
     """Fresh measurement of the finished HDR calibration: PQ greyscale and
-    BT.709 colours in the BT.2020 container, dE ITP (the metric made for HDR)."""
+    BT.709 colours in the BT.2020 container, dE ITP (the metric made for HDR).
+    The greys are read up the ladder and down again, and the mixed colours
+    against their parts, so a TV changing the picture by itself shows up."""
     say("")
     say("Verifying the HDR result (independent measurement, TV out of calibration mode) ...")
-    rows = []
-    for signal in VERIFY_SIGNALS:
-        show_signal(pattern, (signal / 100,) * 3, area)
+
+    def measure(rgb01):
+        show_signal(pattern, rgb01, area)
         time.sleep(settle)
-        rows.append(grey_row(signal, read_with_recovery(meter, log), peak, floor))
+        return read_with_recovery(meter, log)
+
+    up = {signal: measure((signal / 100,) * 3) for signal in VERIFY_SIGNALS}
+    rows = []
+    for signal in VERIFY_SIGNALS[::-1]:
+        down = measure((signal / 100,) * 3)
+        mean = tuple((a + b) / 2 for a, b in zip(up[signal], down))
+        row = grey_row(signal, mean, peak, floor)
+        row["Y_readings"] = [up[signal][1], down[1]]
+        row["unsteady"] = (mean[1] >= max(STEADY_FROM_NITS, 3 * floor)
+                           and abs(up[signal][1] - down[1]) > REPEAT_TOLERANCE * mean[1])
+        rows.insert(0, row)
     say(f"{'Signal':>6}  {'Y cd/m2':>9}  {'PQ target':>9}  {'x':>7}  {'y':>7}  {'dE ITP':>6}")
     for row in rows:
         mark = "  *" if row["below_floor"] else ("  (tone-mapped)" if row["tone_mapped"] else "")
+        if row["unsteady"]:
+            mark += "  (unsteady: {:.3f} then {:.3f})".format(*row["Y_readings"])
         say(f"{row['signal']:>5}%  {row['Y']:9.3f}  {row['target_Y']:9.3f}  {row['x']:7.4f}  {row['y']:7.4f}  "
             f"{row['de']:6.2f}{mark}")
     scored = [r["de"] for r in rows if not r["below_floor"] and not r["tone_mapped"]]
     colours = []
     for name, signal, target in colour_patches():
-        show_signal(pattern, signal, area)
-        time.sleep(settle)
-        xyz = read_with_recovery(meter, log)
+        xyz = measure(signal)
         total = sum(xyz) or 1.0
         colours.append({"name": name, "Y": xyz[1], "target_Y": target[1], "x": xyz[0] / total,
                         "y": xyz[1] / total, "target_x": target[0] / sum(target),
                         "target_y": target[1] / sum(target), "de": delta_e_itp(xyz, target)})
+    by_name = {c["name"]: c for c in colours}
+    for mix, first, second in MIXES:
+        parts = by_name[first]["Y"] + by_name[second]["Y"]
+        by_name[mix]["parts_Y"] = parts
+        by_name[mix]["not_additive"] = parts > 0 and abs(by_name[mix]["Y"] / parts - 1) > ADDITIVE_TOLERANCE
     say(f"{'Colour':>9}  {'Y cd/m2':>9}  {'target':>9}  {'x':>7}  {'y':>7}  {'target x,y':>15}  {'dE ITP':>6}")
     for c in colours:
+        mark = ""
+        if c.get("not_additive"):
+            first, second = next((a, b) for m, a, b in MIXES if m == c["name"])
+            mark = f"  ({first.lower()} + {second.lower()} measured {c['parts_Y']:.2f})"
         say(f"{c['name']:>9}  {c['Y']:9.2f}  {c['target_Y']:9.2f}  {c['x']:7.4f}  {c['y']:7.4f}  "
-            f"{c['target_x']:7.4f},{c['target_y']:7.4f}  {c['de']:6.2f}")
+            f"{c['target_x']:7.4f},{c['target_y']:7.4f}  {c['de']:6.2f}{mark}")
     summary = {"rows": rows, "colours": colours, "peak": peak,
                "average_de": sum(scored) / len(scored) if scored else math.nan,
                "max_de": max(scored) if scored else math.nan,
                "colour_average_de": sum(c["de"] for c in colours) / len(colours),
-               "colour_max_de": max(c["de"] for c in colours)}
+               "colour_max_de": max(c["de"] for c in colours),
+               "unsteady": [r["signal"] for r in rows if r["unsteady"]],
+               "not_additive": [c["name"] for c in colours if c.get("not_additive")]}
+    summary["steady"] = not (summary["unsteady"] or summary["not_additive"])
     say(f"Greyscale: average dE ITP {summary['average_de']:.2f}, worst {summary['max_de']:.2f}   "
         f"Colours: average {summary['colour_average_de']:.2f}, worst {summary['colour_max_de']:.2f}")
     say("* below what the meter reads reliably; (tone-mapped) above half the peak, where LG's tone map "
         "rolls off. Both are shown, not scored.")
+    if not summary["steady"]:
+        say("")
+        say("WARNING: these numbers are not the calibration. The TV changed the picture by itself during the check:")
+        if summary["unsteady"]:
+            say("  the same grey measured differently going up and coming down ("
+                + ", ".join(f"{s:g}%" for s in summary["unsteady"]) + ").")
+        if summary["not_additive"]:
+            say("  mixed colours did not add up (" + ", ".join(summary["not_additive"]).lower()
+                + "): each should measure its two colours added together.")
+        say("Something on the TV is still adjusting brightness. For this picture mode, check that Dynamic Tone "
+            "Mapping, AI Picture Pro, AI Brightness and Energy Saving are Off, and that the meter has not moved. "
+            "Then run LG HDR AutoCal again.")
     return summary

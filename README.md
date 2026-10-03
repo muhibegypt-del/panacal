@@ -35,13 +35,16 @@ Whenever a run stops, the last lines say why, what state the TV was left in (unt
 
 | Step | What it does |
 |---|---|
-| Patterns | A Windows window cannot send HDR10, so patterns come from madTPG, madVR's free test pattern generator (the one DisplayCAL, HCFR and Calman use). It is downloaded into `tools\madVR` the first time. The run puts the madTPG window fullscreen on the TV and turns its HDR mode on (BT.2020, D65, 1000-nit metadata) through madTPG's own API; you only pick the TV's HDR picture mode (Cinema, Cinema Home or Filmmaker) with Dynamic Tone Mapping off, and it continues by itself. If madTPG refuses either step, the run asks you to do it by hand. |
+| Patterns | A Windows window cannot send HDR10, so patterns come from madTPG, madVR's free test pattern generator (the one DisplayCAL, HCFR and Calman use). It is downloaded into `tools\madVR` the first time. The run puts the madTPG window fullscreen on the TV and turns its HDR mode on (BT.2020, D65, 1000-nit metadata) through madTPG's own API; you only pick the TV's HDR picture mode (Cinema, Cinema Home or Filmmaker), and it continues by itself. If madTPG refuses either step, the run asks you to do it by hand. |
+| Steady picture | Turns off Dynamic Tone Mapping for that picture mode, and AI Picture Pro and Energy Saving if they are on (HGIG is left as it is). They change brightness by themselves, and LG's calibration mode bypasses them, so with them on the picture you watch is not the one calibrated. If the TV will not turn Dynamic Tone Mapping off from the PC, the run asks you to do it with the remote and waits; it calibrates nothing while it is on. |
 | Reset | The HDR reference reset: identity 1D LUT, BT.2020 3D LUT and matrix, factory tone map. |
 | Greyscale | The worker's HDR path: 20 levels from 100% down to 1.4%, each on a 2.2 curve against the measured peak while the TV is held in LG's calibration pass-through. Levels dimmer than the meter floor on that curve (with a Spyder5 on a ~700 cd/m2 G2: below 4%) follow the curve calibrated above them. |
 | Colour and tone map | The colour worker's HDR matrix run inherits that calibration session, uploads the BT.2020 3D LUT, then LG's tone map for the measured peak together with the greyscale table, and ends calibration mode. |
-| Verify | PQ greyscale from 5% to 70% signal against ST 2084, and BT.709 colours inside the BT.2020 container on a 100 cd/m2 white, in dE ITP. Levels above half the peak are tone-mapped by the TV and shown, not scored. |
+| Verify | PQ greyscale from 5% to 70% signal against ST 2084, and BT.709 colours inside the BT.2020 container on a 100 cd/m2 white, in dE ITP. Levels above half the peak are tone-mapped by the TV and shown, not scored. The greys are measured going up and again coming down, and cyan, magenta and yellow are checked against the two colours they mix. A TV that changes the picture by itself fails one or both, and the run then says the numbers are not the calibration and what to check. |
 
 **Undo LG AutoCal.bat** clears the current picture mode's white balance and LUTs. It does not bring back LG's factory colours; run LG AutoCal afterwards.
+
+**Pair LG TV.bat** pairs the TV again with a new PIN. Use it when a run says the TV's key has no permission.
 
 Each run keeps everything in `sessions\<date_time>\`: `console.txt` (what the window showed), every reading and TV request, the worker's log and state, and `verification.json`.
 
@@ -73,3 +76,4 @@ Copy `settings.example.json` to `settings.json` only to change a default. The fi
 - The real LG helper pairs by PIN over TLS with a fake webOS TV.
 - The display script runs against a simulated duplicated display with HDR on.
 - The real worker calibrates a simulated LG OLED end to end, and the independent verification checks the result. It covers a TV on full range, a TV on Black Level Low, the lifted-black case, and a stale calibration session.
+- The real HDR workers calibrate a simulated HDR LG that starts with Dynamic Tone Mapping on. The run must turn it off, and must calibrate nothing if the TV keeps it on.

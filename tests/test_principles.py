@@ -9,7 +9,6 @@ import json
 import os
 import shutil
 import tempfile
-import threading
 import time
 import unittest
 from contextlib import redirect_stdout
@@ -20,7 +19,7 @@ from lgcal import app, settings as settings_file, setup
 from lgcal.display import DisplaySetup
 from lgcal.lg import LG
 from lgcal.server import MeterService, is_synthetic_black
-from lgcal.signal import (Reader, classify_range, on_patch, steady_white, summarize, verification_row,
+from lgcal.signal import (classify_range, on_patch, steady_white, summarize, verification_row,
                           wait_for_meter)
 
 
@@ -154,6 +153,9 @@ class PureDecisions(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "damaged"):
                 setup.download("https://x/b.zip", directory / "b.zip", lambda _m: None, {"0000"})
         self.assertFalse((directory / "b.zip").exists())
+        with mock.patch("urllib.request.urlopen", return_value=Response(b"[]")) as opened:
+            self.assertEqual(setup.fetch(setup.PERL_RELEASES), b"[]")
+        self.assertTrue(opened.call_args[0][0].get_header("User-agent").startswith("Mozilla/5.0"))
         page = ('<a href="https://www.argyllcms.com/Argyll_V3.4.0_win64_exe.zip">'
                 '<a href="https://www.argyllcms.com/Argyll_V3.5.0_win64_exe.zip">')
         self.assertTrue(setup.latest_argyll_link(page).endswith("V3.5.0_win64_exe.zip"))
@@ -398,6 +400,50 @@ class Cleanup(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             quiet(app.ensure_paired, FakeLG(), "192.0.2.1", interrupt)
         self.assertTrue(process.killed)
+
+    def test_pairing_again_asks_for_a_new_pin_even_when_the_old_key_connects(self):
+        """'Pair LG TV.bat' is what the TV's permission errors point to; a key
+        that connects but may not change the picture needs a fresh PIN."""
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        state, pin = directory / "state.json", directory / "pin.txt"
+        state.write_text(json.dumps({"status": "pending"}))
+
+        class Done:
+            def poll(self):
+                return 0
+
+        class FakeLG:
+            stored = None
+
+            def connect(self, ip):
+                raise AssertionError("the old key must not short-cut pairing")
+
+            def start_pin_pairing(self, ip, session_dir):
+                return Done(), state, pin
+
+            def update_connect_metadata(self, result, ip):
+                self.stored = result
+
+        def type_pin(_prompt):
+            state.write_text(json.dumps({"status": "ok", "client_key": "new-key"}))
+            return "123456"
+
+        lg = FakeLG()
+        _result, out = quiet(app.ensure_paired, lg, "192.0.2.1", type_pin, force=True)
+        self.assertEqual(lg.stored["client_key"], "new-key")
+        self.assertNotIn("first time only", out)
+        self.assertFalse(pin.exists())
+
+    def test_every_bat_the_messages_name_exists(self):
+        import re
+        root = Path(__file__).resolve().parent.parent
+        named = set()
+        for source in (root / "lgcal").glob("*.py"):
+            named.update(re.findall(r"'([^']+\.bat)'", source.read_text(encoding="utf-8")))
+        self.assertIn("Pair LG TV.bat", named)
+        for name in named:
+            self.assertTrue((root / name).is_file(), name)
 
 
 class PowerShellScripts(unittest.TestCase):

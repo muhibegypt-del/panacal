@@ -45,6 +45,14 @@ def progress_step(done: int, total: int) -> int:
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LGAutoCal"
 
 
+def fetch(url: str) -> bytes:
+    """A small page (a release list) with the same browser user agent as
+    download(): hosts that refuse Python's default refuse it here too."""
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read()
+
+
 def download(url: str, target: Path, say, sha256=()) -> None:
     """Download to target.part, check the SHA-256 when given (one value or
     several accepted values), then rename. A failed or interrupted download
@@ -166,8 +174,7 @@ def install_perl(say) -> str:
     """Strawberry Perl portable into tools/ (no installer, no admin rights)."""
     say("Downloading Strawberry Perl (one time, about 300 MB) ...")
     try:
-        with urllib.request.urlopen(PERL_RELEASES, timeout=60) as response:
-            releases = json.load(response)
+        releases = json.loads(fetch(PERL_RELEASES))
     except (OSError, ValueError) as exc:
         raise SystemExit(f"Could not reach strawberryperl.com ({exc}). Check the internet connection "
                          "and run again.") from None
@@ -243,8 +250,7 @@ def latest_argyll_link(page: str) -> str:
 def install_argyll(say) -> str:
     say("ArgyllCMS is not installed. Downloading it (one time, about 15 MB) ...")
     try:
-        with urllib.request.urlopen(ARGYLL_PAGE, timeout=60) as response:
-            page = response.read().decode("latin-1")
+        page = fetch(ARGYLL_PAGE).decode("latin-1")
     except OSError as exc:
         raise SystemExit(f"Could not reach argyllcms.com ({exc}). Check the internet connection "
                          "and run again.") from None

@@ -31,7 +31,7 @@ from .signal import Reader, detect_range, measure_white, verify, wait_for_meter
 from .colour import build_colour_config, colour_report, commit_greyscale, find_saved_greyscale, verify_colours
 from .dark import extend_dark_end
 from .hdr import (HDR_FIT_LADDER, HDR_MODE_NAMES, HDR_PICTURE_MODES, build_hdr_colour_config,
-                  build_hdr_greyscale_config, hdr_index, verify_hdr)
+                  build_hdr_greyscale_config, hdr_index, steady_picture, verify_hdr)
 from .madtpg import MadTPGPatterns, find_madvr, wait_for_hdr
 from .steps import METER_FLOOR, PICTURE_MODES, build_config
 
@@ -194,7 +194,7 @@ def choose_number(prompt: str, count: int, answer=input) -> int:
         say(f"  Please type a number from 1 to {count}.")
 
 
-def find_tv(lg: LG, settings: dict, pin_input=input) -> str:
+def find_tv(lg: LG, settings: dict, pin_input=input, force_pairing: bool = False) -> str:
     clients = lg.load_clients()
     known = settings.get("tv_ip") or clients.get("ip") or clients.get("manual_ip") or ""
     tvs = discover(lg.probe, known, say)
@@ -214,16 +214,20 @@ def find_tv(lg: LG, settings: dict, pin_input=input) -> str:
             tv = tvs[choose_number("More than one LG TV found. Type the number of the one to calibrate: ",
                                    len(tvs), pin_input)]
     say(f"TV: {tv.get('model_name') or 'LG TV'} at {tv['ip']}")
-    ensure_paired(lg, tv["ip"], pin_input)
+    ensure_paired(lg, tv["ip"], pin_input, force=force_pairing)
     return tv["ip"]
 
 
-def ensure_paired(lg: LG, ip: str, pin_input=input) -> None:
-    say("Connecting to the TV ...")
-    result = lg.connect(ip)
-    if result.get("status") == "ok" and result.get("client_key"):
-        return
-    say("Pairing with the TV (first time only). If the TV asks to allow the connection, accept it.")
+def ensure_paired(lg: LG, ip: str, pin_input=input, force: bool = False) -> None:
+    """Pair once by PIN. force: ask the TV for a new PIN even though the
+    stored key connects (a key without picture-control permission does)."""
+    if not force:
+        say("Connecting to the TV ...")
+        result = lg.connect(ip)
+        if result.get("status") == "ok" and result.get("client_key"):
+            return
+    say("Pairing with the TV" + ("" if force else " (first time only)")
+        + ". If the TV asks to allow the connection, accept it.")
     process, state_file, pin_file = lg.start_pin_pairing(ip, DATA_DIR / "pin-session")
     try:
         state = wait_pin_state(state_file, process, ("pending", "ok", "error"), 30)
@@ -294,6 +298,8 @@ TV_STATE = {
     "greyscale_saved": ("The greyscale calibration is saved in the TV, but the colour stage did not finish, so "
                         "saturated colours show the panel's native wide range. Run 'LG Colour AutoCal.bat' to "
                         "finish them; it keeps the greyscale."),
+    "hdr_steady": ("Nothing was calibrated. Only the TV's own brightness processing (such as Dynamic Tone "
+                   "Mapping) was turned off for this HDR picture mode."),
     "hdr_prepared": ("The HDR mode's calibration data was cleared (the TV shows HDR uncalibrated). Run "
                      "'LG HDR AutoCal.bat' again to calibrate it."),
     "hdr_calibrating": ("The HDR calibration stopped part way; the TV keeps the HDR mode uncalibrated or "
@@ -402,24 +408,10 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
         config = build_config(settings, white["Y"], limited=limited, picture_mode=picture_mode)
         meter_floor = float((settings.get("meter") or {}).get("floor_cd_m2", METER_FLOOR))
         threshold = config.get("lg_autocal_sdr26_dpg_low_ire_threshold") if "greyscale" in stages else None
-        dark_end = None
-        committed = {}
+        dark_end = DarkEnd(session.directory, threshold, log, limited=limited) if threshold else None
         if threshold:
             say(f"Levels below {threshold:g}% are dimmer than {meter_floor:g} cd/m2, too dark for the meter to "
                 "steer; they follow the curve calibrated above them.")
-
-            def dark_end(table):
-                try:
-                    extended, info = extend_dark_end(table, threshold, limited)
-                except ValueError as exc:
-                    log(f"DARK END not extended: {exc}")
-                    return table
-                log(f"DARK END extended below index {info['from_index']} from {info['fit_slots']} "
-                    f"(exponents R/G/B {info['exponents']})")
-                (session.directory / "dark_end.json").write_text(
-                    json.dumps({**info, "worker_table": table, "committed_table": extended}), encoding="utf-8")
-                committed["table"] = extended
-                return extended
         config.update(config_overrides or {})
 
         meter_settings = settings.get("meter") or {}
@@ -441,7 +433,7 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
             if not report(final, session.directory / "worker.log"):
                 return 1
             tv_state[0] = "greyscale_saved"
-            greyscale_table = committed.get("table") or final.get("sdr_1d_dpg_data")
+            greyscale_table = (dark_end and dark_end.table) or final.get("sdr_1d_dpg_data")
 
         say("")
         say("Calibrating colour: white, red, green, blue and black are measured and a 3D LUT maps "
@@ -474,6 +466,31 @@ def _run(session: Session, settings: dict, tv_state: list, *, pattern, meter, he
         return 0 if colour_ok else 1
     finally:
         close_run(lg, running, server, owned, log)
+
+
+class DarkEnd:
+    """The final-commit hook (server.Api final_dpg): levels too dark for the
+    meter follow the curve calibrated above them (lgcal.dark). Keeps the
+    worker's and the committed table in dark_end.json; .table is the last
+    committed one."""
+
+    def __init__(self, directory: Path, threshold: float, log, label: str = "", **fit):
+        self.path = directory / "dark_end.json"
+        self.threshold, self.log, self.label, self.fit = threshold, log, label, fit
+        self.table = None
+
+    def __call__(self, table):
+        try:
+            extended, info = extend_dark_end(table, self.threshold, **self.fit)
+        except ValueError as exc:
+            self.log(f"DARK END not extended: {exc}")
+            return table
+        self.log(f"DARK END{self.label} extended below index {info['from_index']} from {info['fit_slots']} "
+                 f"(exponents R/G/B {info['exponents']})")
+        self.path.write_text(json.dumps({**info, "worker_table": table, "committed_table": extended}),
+                             encoding="utf-8")
+        self.table = extended
+        return extended
 
 
 def close_run(lg: LG, running: list, server, owned: list, log) -> None:
@@ -552,6 +569,8 @@ def _run_hdr(session: Session, settings: dict, tv_state: list, *, pattern, meter
                         raise SystemExit("madTPG was not put fullscreen on the TV within 10 minutes.")
                     time.sleep(1)
         say(f"Calibrating the HDR picture mode the TV is in: {HDR_MODE_NAMES.get(picture_mode, picture_mode)}")
+        if steady_picture(lg, picture_mode, say, log, timeout=600 * delay_scale, sleep=sleep):
+            tv_state[0] = "hdr_steady"
         if meter is None:
             meter = open_meter(settings, lg, log, owned)
         reader = Reader(pattern, meter, log, int(settings.get("patch_size") or 10), settle_scale=delay_scale)
@@ -568,23 +587,11 @@ def _run_hdr(session: Session, settings: dict, tv_state: list, *, pattern, meter
         peak = white["Y"]
         config = build_hdr_greyscale_config(settings, peak, picture_mode, floor)
         threshold = config.get("lg_autocal_hdr20_dpg_low_ire_threshold")
-        dark_end = None
+        dark_end = (DarkEnd(session.directory, threshold, log, " (HDR)", index_for=hdr_index,
+                            ladder=HDR_FIT_LADDER) if threshold else None)
         if threshold:
             say(f"HDR levels below {threshold:g}% are dimmer than {floor:g} cd/m2 during calibration, too dark "
                 "for the meter to steer; they follow the curve calibrated above them.")
-
-            def dark_end(table):
-                try:
-                    extended, info = extend_dark_end(table, threshold, index_for=hdr_index,
-                                                     ladder=HDR_FIT_LADDER)
-                except ValueError as exc:
-                    log(f"DARK END not extended: {exc}")
-                    return table
-                log(f"DARK END (HDR) extended below index {info['from_index']} from {info['fit_slots']} "
-                    f"(exponents R/G/B {info['exponents']})")
-                (session.directory / "dark_end.json").write_text(
-                    json.dumps({**info, "worker_table": table, "committed_table": extended}), encoding="utf-8")
-                return extended
         config.update(config_overrides or {})
         service = MeterService(pattern, meter, log, bool((settings.get("meter") or {}).get("synthetic_black", True)))
         service.delay_scale = delay_scale
@@ -827,7 +834,7 @@ def pair_or_undo(settings: dict, command: str) -> int:
         try:
             perl = find_perl(settings, say)
             lg = LG(perl, HELPER, DATA_DIR, session.log, perl_env(None, None, HELPER, perl))
-            find_tv(lg, settings)
+            find_tv(lg, settings, force_pairing=command == "pair")
             if command == "undo":
                 lg.clear_stale_calibration_mode()
                 mode = choose_picture_mode(lg, settings)
@@ -853,7 +860,7 @@ def main(argv=None) -> int:
     parser.add_argument("command", nargs="?", default="run", choices=["run", "colour", "hdr", "pair", "undo"],
                         help="run (default): greyscale then colour; colour: only the colour stage, keeping "
                              "the greyscale in the TV; hdr: HDR10 greyscale and colour with madTPG patterns; "
-                             "pair: only find and pair the TV; "
+                             "pair: find the TV and pair it again with a new PIN; "
                              "undo: clear the mode's white balance and LUTs")
     args = parser.parse_args(argv)
     console_click_proof()

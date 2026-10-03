@@ -356,7 +356,7 @@ def wait_for_hdr(lg, say, modes, timeout: float = 600, clock=time.monotonic, sle
         steps.append("Drag the madTPG window onto the TV and double-click it for fullscreen.")
     if not hdr:
         steps.append("Click madTPG's 'HDR' button (in the button's menu: BT.2020, 1000 nits).")
-    steps.append("On the TV, pick Cinema, Cinema Home or Filmmaker (HDR) and set Dynamic Tone Mapping to Off.")
+    steps.append("On the TV, pick the HDR picture mode to calibrate: Cinema, Cinema Home or Filmmaker.")
     mode = lg.current_picture_mode()
     if mode in modes:
         return mode

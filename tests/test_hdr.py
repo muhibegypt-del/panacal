@@ -8,10 +8,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lgcal import app
 from lgcal.hdr import (HDR_CODES_10BIT_FULL, HDR_PICTURE_MODES, HDR_SLOTS, build_hdr_colour_config,
-                       build_hdr_greyscale_config, colour_patches, hdr_dark_threshold, hdr_index, hdr_steps,
-                       pq_decode, pq_encode)
+                       build_hdr_greyscale_config, colour_patches, hdr_dark_threshold, hdr_index,
+                       pq_decode, pq_encode, steady_picture, verify_hdr)
 from lgcal import madtpg
 from lgcal.madtpg import HDR_METADATA, MadTPGPatterns, find_madvr, wait_for_hdr
 
@@ -194,7 +193,8 @@ class MadTPG(unittest.TestCase):
         self.assertIn("sending HDR10", text)
         self.assertNotIn("Drag", text)
         self.assertNotIn("'HDR' button", text)
-        self.assertIn("Dynamic Tone Mapping", text)
+        self.assertIn("Cinema", text)
+        self.assertNotIn("Dynamic Tone Mapping", text)      # the run turns it off itself
 
     def test_wait_for_hdr(self):
         class LG:
@@ -212,6 +212,105 @@ class MadTPG(unittest.TestCase):
         with self.assertRaises(SystemExit):
             wait_for_hdr(LG(["expert2"]), said.append, HDR_PICTURE_MODES, clock=lambda: next(tick),
                          sleep=lambda _s: None)
+
+
+class FakeTV:
+    """picture_get / picture_set as lg.LG returns them; `ignored` keys are
+    acknowledged but stay as they were, as a TV refusing them might."""
+    def __init__(self, values, ignored=(), readable=True):
+        self.values, self.ignored, self.readable, self.writes = dict(values), set(ignored), readable, []
+
+    def picture_settings(self, payload):
+        if not self.readable:
+            return {"status": "error", "message": "no answer"}
+        return {"status": "ok", "picture_settings": {k: self.values[k] for k in payload["keys"] if k in self.values}}
+
+    def picture_settings_set(self, payload):
+        self.writes.append(payload)
+        for key, value in payload["settings"].items():
+            if key not in self.ignored:
+                self.values[key] = value
+        return {"status": "ok", "picture_settings": dict(payload["settings"])}
+
+
+class SteadyPicture(unittest.TestCase):
+    def run_it(self, tv, **kwargs):
+        said = []
+        turned_off = steady_picture(tv, "hdrCinema", said.append, lambda _m: None, **kwargs)
+        return turned_off, "\n".join(said)
+
+    def test_dynamic_processing_is_turned_off_for_the_mode_being_calibrated(self):
+        tv = FakeTV({"hdrDynamicToneMapping": "on", "aiPicture": "on", "energySaving": "auto"})
+        turned_off, text = self.run_it(tv)
+        self.assertEqual(turned_off, ["Dynamic Tone Mapping", "AI Picture Pro", "Energy Saving"])
+        self.assertEqual(set(tv.values.values()), {"off"})
+        self.assertEqual({w["picture_mode"] for w in tv.writes}, {"hdrCinema"})
+        self.assertFalse(any(w["keep_calibration_mode"] for w in tv.writes))
+        self.assertIn("Turned off Dynamic Tone Mapping, AI Picture Pro and Energy Saving", text)
+
+    def test_steady_settings_and_missing_keys_are_left_alone(self):
+        tv = FakeTV({"hdrDynamicToneMapping": "HGIG", "energySaving": "off"})     # no AI Picture on this model
+        self.assertEqual(self.run_it(tv), ([], ""))
+        self.assertEqual(tv.writes, [])
+
+    def test_unreadable_settings_are_reported_not_guessed(self):
+        tv = FakeTV({"hdrDynamicToneMapping": "on"}, readable=False)
+        turned_off, text = self.run_it(tv)
+        self.assertEqual((turned_off, tv.writes), ([], []))
+        self.assertIn("Dynamic Tone Mapping is Off", text)
+
+    def test_a_refused_dynamic_tone_mapping_waits_for_the_remote(self):
+        tv = FakeTV({"hdrDynamicToneMapping": "on"}, ignored={"hdrDynamicToneMapping"})
+        polls = []
+
+        def user_turns_it_off(_seconds):
+            polls.append(1)
+            if len(polls) == 3:
+                tv.values["hdrDynamicToneMapping"] = "off"
+        turned_off, text = self.run_it(tv, sleep=user_turns_it_off)
+        self.assertEqual(turned_off, [])
+        self.assertIn("Settings > Picture > Advanced Settings > Brightness", text)
+        self.assertIn("Dynamic Tone Mapping is off.", text)
+
+    def test_dynamic_tone_mapping_left_on_stops_the_run(self):
+        tv = FakeTV({"hdrDynamicToneMapping": "on"}, ignored={"hdrDynamicToneMapping"})
+        tick = iter(range(0, 10000, 100))
+        with self.assertRaises(SystemExit) as stop:
+            self.run_it(tv, clock=lambda: next(tick), sleep=lambda _s: None)
+        self.assertIn("Nothing was calibrated", str(stop.exception))
+
+    def test_other_refused_settings_only_warn(self):
+        tv = FakeTV({"hdrDynamicToneMapping": "off", "energySaving": "auto"}, ignored={"energySaving"})
+        turned_off, text = self.run_it(tv)
+        self.assertEqual(turned_off, [])
+        self.assertIn("Energy Saving is auto", text)
+
+
+class Verification(unittest.TestCase):
+    def check(self, dynamic: bool) -> tuple[dict, str]:
+        from tests.sim.sim_tv import Panel, SimMeter, SimPattern
+        panel = Panel(peak=700.0)
+        panel.hdr = True
+        panel.dynamic_tone_mapping = dynamic
+        pattern = SimPattern(hdr=True)
+        said = []
+        result = verify_hdr(pattern, SimMeter(panel, pattern), lambda _m: None, 0.1, 700.0, 0.3, said.append,
+                            settle=0)
+        return result, "\n".join(said)
+
+    def test_a_steady_tv_passes_the_steadiness_checks(self):
+        result, text = self.check(dynamic=False)
+        self.assertTrue(result["steady"])
+        self.assertEqual((result["unsteady"], result["not_additive"]), ([], []))
+        self.assertNotIn("WARNING", text)
+        self.assertTrue(all(len(row["Y_readings"]) == 2 for row in result["rows"]))
+
+    def test_a_tv_adjusting_the_picture_itself_is_called_out(self):
+        result, text = self.check(dynamic=True)
+        self.assertFalse(result["steady"])
+        self.assertTrue(result["unsteady"])
+        self.assertIn("WARNING: these numbers are not the calibration", text)
+        self.assertIn("Dynamic Tone Mapping", text)
 
 
 class HdrRun(unittest.TestCase):
@@ -234,6 +333,24 @@ class HdrRun(unittest.TestCase):
                 self.assertAlmostEqual(row["Y"] / row["target_Y"], 1.0, delta=0.03, msg=f"{row['signal']}%")
         self.assertLess(result["colour_average_de"], 1.5)
         self.assertLess(result["colour_max_de"], 3.0)
+        # The simulated TV starts with Dynamic Tone Mapping on, as LG ships HDR modes.
+        self.assertEqual(tv.processing["hdrDynamicToneMapping"], "off")
+        self.assertIn("Turned off Dynamic Tone Mapping", console)
+        self.assertTrue(result["steady"], console[-3000:])
+
+    def test_no_calibration_while_dynamic_tone_mapping_stays_on(self):
+        from tests.sim.run_sim import simulate
+        from tests.sim.sim_tv import Panel, SimTV
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        tv = SimTV(Panel(peak=700.0))
+        tv.ignored = {"hdrDynamicToneMapping"}
+        code, _state, tv, _meter, console = simulate(directory, hdr=True, tv=tv)
+        self.assertEqual(code, 2, console[-3000:])
+        self.assertIn("Dynamic Tone Mapping is still on", console)
+        self.assertNotIn("hdr_calman_reset", tv.requests)
+        self.assertEqual((tv.uploads, tv.lut_uploads, tv.tone_maps), (0, 0, 0))
+        self.assertIn("Nothing on the TV was changed", console)
 
 
 if __name__ == "__main__":

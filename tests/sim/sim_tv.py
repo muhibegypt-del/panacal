@@ -176,6 +176,11 @@ class Panel:
         self.hdr = False
         self.calibrating = False
         self.tone_peak = peak
+        # Dynamic Tone Mapping (or AI Picture) outside calibration mode: it
+        # re-grades each frame and follows the scene with a lag, so a patch
+        # brighter than the one before comes out too bright for a while.
+        self.dynamic_tone_mapping = False
+        self.scene = 0.0
         self.reference = identity(sample_index(255))  # legal white 940
         self.lock = threading.Lock()
 
@@ -208,6 +213,11 @@ class Panel:
                 # PQ -> relative to the tone-map peak (hard clip), onto the
                 # 2.2 panel curve that calibration mode passes straight through.
                 v = tuple(min(1.0, pq_nits(c) / self.tone_peak) ** (1 / 2.2) for c in v)
+                if self.dynamic_tone_mapping:
+                    top = max(v)
+                    lift = 1 + 0.25 * max(0.0, 1 - self.scene / top) if top > 0 else 1.0
+                    self.scene = top
+                    v = tuple(min(1.0, c * lift) for c in v)
             # The 3D LUT and 1D LUT act on that panel-referred signal, which is
             # what the colour worker profiles in calibration mode (its model
             # uses the greyscale's 2.2 curve).
@@ -310,6 +320,11 @@ class SimTV:
             panel.dpg[2] = [v * 1.06 for v in panel.dpg[2]]
         self.wb = {"whiteBalanceRed": [0] * 26, "whiteBalanceGreen": [0] * 26,
                    "whiteBalanceBlue": [0] * 26, "adjustingLuminance": [0] * 26}
+        # LG ships HDR modes with Dynamic Tone Mapping on (on a G2 even HDR Filmmaker).
+        self.processing = {"hdrDynamicToneMapping": "on", "aiPicture": "off", "energySaving": "auto"}
+        self.unsupported: set[str] = set()     # keys this model does not have
+        self.ignored: set[str] = set()         # keys it acknowledges but does not change
+        self.sync_processing()
         self.requests: list[str] = []
         self.uploads = 0
         self.lut_uploads = 0
@@ -326,7 +341,12 @@ class SimTV:
 
     def settings(self) -> dict:
         return {"pictureMode": self.picture_mode, "whiteBalanceMethod": "22", "whiteBalanceIre": "100",
-                "backlight": self.backlight, **{k: list(v) for k, v in self.wb.items()}}
+                "backlight": self.backlight, **{k: list(v) for k, v in self.wb.items()},
+                **{k: v for k, v in self.processing.items() if k not in self.unsupported}}
+
+    def sync_processing(self) -> None:
+        self.panel.dynamic_tone_mapping = "on" in (self.processing.get("hdrDynamicToneMapping"),
+                                                   self.processing.get("aiPicture"))
 
     def set_backlight(self, value) -> None:
         # OLED pixel brightness scales the whole light output.
@@ -351,9 +371,18 @@ class SimTV:
                     "active_picture_mode": mode, "message": "LG calibration mode "
                     + ("enabled" if self.calibration_mode else "disabled")}
         if action == "picture_get":
-            return {**ok, "picture_settings": self.settings(), "active_picture_mode": mode}
+            missing = {k: f"category, picture doesn't support the key(s): {k}"
+                       for k in request.get("keys") or [] if k in self.unsupported}
+            return {**ok, "picture_settings": self.settings(), "unsupported_picture_keys": missing,
+                    "active_picture_mode": mode}
         if action == "picture_set":
             settings = request.get("settings") or {}
+            for key in [k for k in settings if k in self.processing]:
+                if key in self.unsupported:
+                    return {"status": "error", "message": f"category, picture doesn't support the key(s): {key}"}
+                if key not in self.ignored:
+                    self.processing[key] = settings[key]
+            self.sync_processing()
             if settings.get("pictureMode"):
                 self.picture_mode = settings["pictureMode"]
             if "backlight" in settings:
