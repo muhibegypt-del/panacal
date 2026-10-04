@@ -46,9 +46,9 @@ class FakeClient:
         return {"settings": {k: values[k] for k in keys if k in values}}
 
 
-def run(client, gpu="nvidia"):
+def run(client):
     said = []
-    missed = asyncio.run(game.setup(client, 2, gpu, said.append, sleep=lambda _s: asyncio.sleep(0)))
+    missed = asyncio.run(game.setup(client, 2, said.append, sleep=lambda _s: asyncio.sleep(0)))
     return missed, "\n".join(said), client.calls
 
 
@@ -68,7 +68,8 @@ class Setup(unittest.TestCase):
         self.assertIn(("public", "picture", {"truMotionMode": "off"}, True), calls)
         self.assertEqual((internal["inputOptimization"], internal["gameOptimizationHDMI2"],
                           internal["freesyncOLEDHDMI2"], internal["gameMode"], internal["logoLuminanceAdjust"]),
-                         ("on", "on", "off", {"hdmi2": "on"}, "off"))
+                         ("on", "on", "on", {"hdmi2": "on"}, "off"))
+        self.assertEqual(public["adjustingLuminance"], [5] + [0] * 21)       # 2.5% +5
         # every internal write is followed by ENTER, as the G2 scripts do
         for i, call in enumerate(calls):
             if call[0] == "internal":
@@ -76,26 +77,18 @@ class Setup(unittest.TestCase):
         self.assertIn(("tpc_gsr", "tpc", False), calls)
         self.assertIn(("tpc_gsr", "gsr", False), calls)
 
-    def test_hdr_game_mode_gets_the_hdr_column_and_amd_gets_freesync(self):
-        _missed, _text, calls = run(FakeClient(mode="hdrGame"), gpu="amd")
+    def test_hdr_game_mode_gets_the_hdr_column(self):
+        _missed, _text, calls = run(FakeClient(mode="hdrGame"))
         public, internal = sent(calls, "public"), sent(calls, "internal")
         self.assertEqual((public["hdrDynamicToneMapping"], public["contrast"], public["peakBrightness"],
-                          internal["freesyncOLEDHDMI2"], internal["gameOptimization"]), ("HGIG", "100", "high", "on", "off"))
+                          internal["freesync"], internal["gameOptimization"]), ("HGIG", "100", "high", "on", "on"))
+        self.assertNotIn("adjustingLuminance", public)
         self.assertNotIn("pictureMode", internal)
 
     def test_a_refused_or_kept_picture_setting_is_reported(self):
         missed, _text, _calls = run(FakeClient(stored={"sharpness": "10"}, refuse={"blackLevel"}))
         self.assertTrue(any(m.startswith("Video Range") for m in missed), missed)
         self.assertIn('Sharpness (the TV has "10")', missed)
-
-    def test_graphics_card_from_windows(self):
-        class Done:
-            def __init__(self, names):
-                self.stdout = names
-        for names, vendor in (("NVIDIA GeForce RTX 4080\nNVIDIA GeForce GT 710", "nvidia"),
-                              ("AMD Radeon RX 7900 XTX", "amd"),
-                              ("NVIDIA GeForce RTX 4080\nAMD Radeon(TM) Graphics", "")):
-            self.assertEqual(game.gpu_vendor(run=lambda *_a, **_k: Done(names)), vendor)
 
 
 def port_free(port: int) -> bool:
@@ -118,8 +111,7 @@ class RealLibrary(unittest.TestCase):
             pass                                     # the fake TV has no pointer-input socket
         said = []
         with mock.patch.object(WebOsClient, "button", enter):
-            missed = game.run("127.0.0.1", str(directory / "keys.sqlite"), 2, said.append, vendor=lambda: "amd",
-                              client_key=KEY)
+            missed = game.run("127.0.0.1", str(directory / "keys.sqlite"), 2, said.append, client_key=KEY)
         self.assertEqual(missed, [], "\n".join(said))
         self.assertEqual((tv.input, tv.devices["HDMI_2"]), ("HDMI_2", "pc.png"))
         other, picture = tv.settings["other"], tv.settings["picture"]
