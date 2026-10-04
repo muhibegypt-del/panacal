@@ -79,10 +79,15 @@ class FakeWebOS:
         self.alerts: list[dict] = []           # internal (luna://) calls sent through the alert bridge
         self.settings = {"picture": {"pictureMode": "expert2", "energySaving": "auto",
                                      "logoLuminanceAdjust": "strong"},
-                         "other": {"gameMode": {"hdmi1": "off", "hdmi2": "off"}}}
+                         "other": {"gameMode": {"hdmi1": "off", "hdmi2": "off"}}, "aiPicture": {}}
         self.input = "HDMI_1"
+        # A 2021 C1 by default; set_model() makes it another generation.
+        self.model, self.platform, self.product = "OLED65C1FAKE", "HE_DTV_W21O_AFABATAA", "webOSTV 6.0"
         self.running = True
         threading.Thread(target=self._accept, daemon=True).start()
+
+    def set_model(self, model: str, platform: str, product: str) -> None:
+        self.model, self.platform, self.product = model, platform, product
 
     def close(self) -> None:
         self.running = False
@@ -153,10 +158,10 @@ class FakeWebOS:
                 conn.sendall(frame({"type": "error", "id": mid, "error": "401 wrong PIN"}))
         elif uri == "ssap://system/getSystemInfo":
             conn.sendall(frame({"type": "response", "id": mid, "payload": {
-                "returnValue": True, "modelName": "OLED65C1FAKE", "features": {}}}))
+                "returnValue": True, "modelName": self.model, "features": {}}}))
         elif uri == "ssap://com.webos.service.update/getCurrentSWInformation":
             conn.sendall(frame({"type": "response", "id": mid, "payload": {
-                "returnValue": True, "product_name": "webOSTV 6.0", "model_name": "HE_DTV_W21O_AFABATAA",
+                "returnValue": True, "product_name": self.product, "model_name": self.platform,
                 "major_ver": "03", "minor_ver": "20.00", "device_id": "aa:bb:cc:dd:ee:ff"}}))
         elif uri == "ssap://system.notifications/createAlert":
             self.alerts.append((message.get("payload") or {}).get("onclose") or {})

@@ -462,21 +462,34 @@ class Cleanup(unittest.TestCase):
             def current_picture_mode(self):
                 return "hdrGame"
 
+            def oled_dimming(self, enable):
+                return {"status": "ok"}
+
             def picture_settings_set(self, payload):
                 self.writes.append(payload)
                 if "freesync" in payload["settings"]:
                     return {"status": "error", "message": "doesn't support the key(s): freesync"}
                 return {"status": "ok", "picture_settings": payload["settings"]}
         lg = FakeLG()
-        missed, out = quiet(app.setup_gaming, lg, 3, sleep=lambda _s: None, ask_input=lambda _p: "2")  # Xbox
+        missed, out = quiet(app.setup_gaming, lg, 3, sleep=lambda _s: None, vendor=lambda: "",
+                            ask_input=lambda _p: "2")      # AMD, asked because it could not tell
         self.assertEqual(missed, ["AMD FreeSync Premium on"])
         written = [w["settings"] for w in lg.writes]
-        for wanted in ({"hdrDynamicToneMapping": "HGIG"}, {"gameMode": {"hdmi3": "on"}}, {"gameOptimization": "off"},
-                       {"contrast": "100"}, {"brightness": "50"}, {"peakBrightness": "high"}, {"color": "50"}):
+        for wanted in ({"hdrDynamicToneMapping": "HGIG"}, {"gameMode": {"hdmi3": "on"}}, {"hdmiPcMode": {"hdmi3": True}},
+                       {"gameOptimization": "off", "gameOptimizationHDMI3": "off"}, {"contrast": "100"},
+                       {"brightness": "50"}, {"peakBrightness": "high"}, {"color": "50"}):
             self.assertIn(wanted, written)
-        self.assertFalse(any("adjustingLuminance" in w for w in written))      # the tweak is SDR only
-        self.assertTrue(app.matches([5, 0], ["5", "0"]) and not app.matches([5, 0], [0, 0]))
         self.assertNotIn("run this again", out)
+        self.assertTrue(app.matches([5, 0], ["5", "0"]) and not app.matches([5, 0], [0, 0]))
+
+    def test_the_graphics_card_is_read_from_windows(self):
+        class Done:
+            def __init__(self, names):
+                self.stdout = names
+        for names, vendor in (("NVIDIA GeForce RTX 4080\nNVIDIA GeForce GT 710", "nvidia"),
+                              ("AMD Radeon RX 7900 XTX", "amd"),
+                              ("NVIDIA GeForce RTX 4080\nAMD Radeon(TM) Graphics", "")):
+            self.assertEqual(app.gpu_vendor(run=lambda *_a, **_k: Done(names)), vendor)
 
     def test_every_bat_the_messages_name_exists(self):
         import re

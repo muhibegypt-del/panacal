@@ -7767,7 +7767,7 @@ sub main (@) {
 	 } elsif($action eq "picture_get") {
 	  $result=&lg_picture_get_workflow($ip,$client_key,$connect_timeout,$keys,$picture_mode,$tv_input,$force_ddc_white_balance,$signal_mode,$include_current_input);
 	 } elsif($action eq "picture_set") {
-  $PICTURE_SET_CATEGORY=($request->{"category"}||"") eq "other" ? "other" : "picture"; # PC-PORT
+  $PICTURE_SET_CATEGORY=(($request->{"category"}||"") =~ /^(other|aiPicture)$/) ? $1 : "picture"; # PC-PORT
 		  $result=&lg_picture_set_workflow($ip,$client_key,$connect_timeout,$settings,$readback_keys,$tv_input,$keep_calibration_mode,$picture_mode,$calibration_mode_active,$reset_ddc_baseline,$verify_ddc_upload,$force_ddc_white_balance,$signal_mode);
  } elsif($action eq "picture_reset") {
   $result=&lg_picture_reset_workflow($ip,$client_key,$connect_timeout,$tv_input,$picture_mode,$signal_mode,$require_white_balance_reset,$reset_ddc_state);

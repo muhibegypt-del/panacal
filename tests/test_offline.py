@@ -312,26 +312,31 @@ class TransportTests(unittest.TestCase):
 
     def test_game_setup_goes_through_the_calibration_settings_path(self):
         from tests.fake_webos import PIN
+        self.tv.set_model("OLED55G26LA", "HE_DTV_W22O_AFABATAA", "webOSTV 7.0")     # a 2022 G2
         lg = LG(PERL, app.HELPER, app.DATA_DIR, lambda _m: None, app.perl_env(None, None))
         app.find_tv(lg, {"tv_ip": "127.0.0.1"}, pin_input=lambda _p: PIN)
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            missed = app.setup_gaming(lg, 2, sleep=lambda _s: None, ask_input=lambda _p: "1")   # PlayStation
+            missed = app.setup_gaming(lg, 2, sleep=lambda _s: None, vendor=lambda: "nvidia",
+                                      ask_input=lambda _p: self.fail("asked for the graphics card"))
         self.assertEqual(missed, [], out.getvalue())
         self.assertEqual(self.tv.input, "HDMI_2")
-        other, picture = self.tv.settings["other"], self.tv.settings["picture"]
+        other, picture, ai = self.tv.settings["other"], self.tv.settings["picture"], self.tv.settings["aiPicture"]
         self.assertEqual(other["gameMode"], {"hdmi1": "off", "hdmi2": "on"})
-        self.assertEqual((other["uhdDeepColorHDMI2"], other["enableALLM"], other["gameOptimization"],
-                          other["freesync"], other["inputOptimization"]), ("on", "on", "on", "off", "boost"))
-        self.assertEqual((picture["pictureMode"], picture["energySaving"], picture["logoLuminanceAdjust"],
-                          picture["contrast"], picture["brightness"], picture["color"], picture["peakBrightness"]),
-                         ("game", "off", "off", "85", "49", "55", "off"))
-        self.assertEqual((picture["whiteBalanceMethod"], picture["adjustingLuminance"]), ("22", [5] + [0] * 21))
-        self.assertNotIn("hdmiPcMode", other)                      # a PlayStation is not a PC
-        self.assertNotIn("hdrDynamicToneMapping", picture)        # only in an HDR mode
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(app.setup_gaming(lg, 2, sleep=lambda _s: None, ask_input=lambda _p: "3"), [],
-                             out.getvalue())                       # NVIDIA PC
         self.assertEqual(other["hdmiPcMode"], {"hdmi2": True})
+        self.assertEqual((other["uhdDeepColorHDMI2"], other["enableALLM"], other["gameOptimizationHDMI2"],
+                          other["freesyncOLEDHDMI2"], other["inputOptimization"], other["gameGenre"],
+                          other["blackStabilizer"], other["whiteStabilizer"]),
+                         ("on", "on", "on", "off", "on", "Standard", 10, 10))
+        self.assertEqual(ai, {"ai_Picture": "off", "ai_Brightness": "off", "ai_Genre": "off"})
+        self.assertEqual((picture["pictureMode"], picture["energySaving"], picture["logoLuminanceAdjust"],
+                          picture["contrast"], picture["brightness"], picture["color"], picture["peakBrightness"],
+                          picture["gamma"], picture["colorTemperature"], picture["blackLevel"]["unknown"]),
+                         ("game", "off", "off", "85", "49", "55", "off", "medium", "-45", "auto"))
+        self.assertNotIn("adjustingLuminance", picture)            # a 2022 set has no 2.5% point
+        self.assertNotIn("hdrDynamicToneMapping", picture)         # only in an HDR mode
+        self.assertEqual([a["uri"] for a in self.tv.alerts][-2:],
+                         ["luna://com.webos.service.oledepl/setTemporalPeakControl",
+                          "luna://com.webos.service.oledepl/setGlobalStressReduction"])
         self.assertIn("run this again", out.getvalue())
 
     def test_oled_dimming_switches_tpc_and_gsr_through_the_real_helper(self):
