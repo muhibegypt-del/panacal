@@ -313,6 +313,11 @@ class TransportTests(unittest.TestCase):
     def test_game_setup_goes_through_the_calibration_settings_path(self):
         from tests.fake_webos import PIN
         self.tv.set_model("OLED55G26LA", "HE_DTV_W22O_AFABATAA", "webOSTV 7.0")     # a 2022 G2
+        # The keys a real G2 refused on the public route (its first run of LG Game Setup).
+        self.tv.locked = {"hdmiPcMode", "gameMode", "enableALLM", "gameOptimization", "gameOptimizationHDMI2",
+                          "freesync", "freesyncOLEDHDMI2", "inputOptimization", "gameGenre", "blackStabilizer",
+                          "whiteStabilizer", "lowLevelAdjustment", "darkMode", "blueLight", "logoLuminanceAdjust",
+                          "eyeComfortMode", "motionProOLED"}
         lg = LG(PERL, app.HELPER, app.DATA_DIR, lambda _m: None, app.perl_env(None, None))
         app.find_tv(lg, {"tv_ip": "127.0.0.1"}, pin_input=lambda _p: PIN)
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -334,6 +339,9 @@ class TransportTests(unittest.TestCase):
                          ("game", "off", "off", "85", "49", "55", "off", "medium", "-45", "auto"))
         self.assertNotIn("adjustingLuminance", picture)            # a 2022 set has no 2.5% point
         self.assertNotIn("hdrDynamicToneMapping", picture)         # only in an HDR mode
+        internal = {k for a in self.tv.alerts if a.get("uri") == "luna://com.webos.settingsservice/setSystemSettings"
+                    for k in a["params"]["settings"]}
+        self.assertEqual(internal, self.tv.locked)       # exactly the refused keys took the internal route
         self.assertEqual([a["uri"] for a in self.tv.alerts][-2:],
                          ["luna://com.webos.service.oledepl/setTemporalPeakControl",
                           "luna://com.webos.service.oledepl/setGlobalStressReduction"])

@@ -9,7 +9,7 @@
 | `pgen/bin/pgenerator-lg` | `usr/sbin/pgenerator-lg` (the LG webOS helper) |
 | `pgen/share/PGenerator/PGMath.pm`, `PGCalibrationMath.pm`, `PGMeterReading.pm`, `PGSignalCode.pm` | `usr/share/PGenerator/` |
 
-Commit `d71e990` imports them unmodified. Every later change is marked `PC-PORT` (portability, plus two added helper commands) or `PC-PORT FIX` (one upstream bug). Run `git diff d71e990 -- pgen/` to see the full diff (50 lines added, 15 removed).
+Commit `d71e990` imports them unmodified. Every later change is marked `PC-PORT` (portability, plus two added helper commands) or `PC-PORT FIX` (one upstream bug). Run `git diff d71e990 -- pgen/` to see the full diff (54 lines added, 16 removed).
 
 The calibration logic is the author's: targets, the solver, the 1D LUT build, the LG protocol and calibration-mode handling. The single change to it is the bug fix below. Each patch falls back to the original value when its environment variable is unset. The TLS change applies only on Windows or when `PGEN_LG_NATIVE_TLS` is set. On a Pi the files therefore behave exactly as upstream.
 
@@ -53,6 +53,7 @@ Upstream maps legal black (code 16) to 128 instead of 64. That puts every entry 
 | `lg_remote_control_workflow` | Commands `instart` and `ezadjust` launch `com.webos.app.factorywin` with `{id: executeFactory, irKey: inStart / ezAdjust}` | Opens LG's service menu for **LG Service Menu.bat**, the way the service remote's key does; the same request [bscpylgtv](https://github.com/chros73/bscpylgtv) documents. Added, not a port: the other commands are untouched. |
 | `lg_remote_control_workflow` | Commands `dimming_off` and `dimming_on` call `com.webos.service.oledepl/setTemporalPeakControl` and `setGlobalStressReduction` with `{enable}` through the helper's own `lg_luna_request` bridge | In-Start's TPC Enable and GSR Enable for **LG OLED Dimming.bat**; the same calls as bscpylgtv's `enable_tpc_or_gsr`. Added, not a port. |
 | `lg_picture_set_workflow`, `$PICTURE_SET_CATEGORY` | A `picture_set` request may name `category: "other"`; the write and its read-back then use that category, without the picture-mode dimension | Game Optimizer, VRR, FreeSync, Prevent Input Delay, ALLM and HDMI Deep Colour live in the TV's `other` settings; **LG Game Setup.bat** writes them through the same path calibration uses. Requests without it behave exactly as upstream. |
+| `lg_picture_set_workflow` | The Luna fallback also runs when the public route answers "Some keys are not allowed for the request", waits 0.6 s after it, and the reply carries `readback_confirmed` | A 2022 G2 refuses Game Optimizer, ALLM, VRR, FreeSync, stabiliser, logo and motion keys on `settings/setSystemSettings`; LG's internal settings service takes them, as ColorControl writes them. `readback_confirmed` says whether the values were read back or only echoed. |
 
 ## Left as they are
 

@@ -468,8 +468,12 @@ class Cleanup(unittest.TestCase):
             def picture_settings_set(self, payload):
                 self.writes.append(payload)
                 if "freesync" in payload["settings"]:
-                    return {"status": "error", "message": "doesn't support the key(s): freesync"}
-                return {"status": "ok", "picture_settings": payload["settings"]}
+                    return {"status": "error", "message": "LG TV did not acknowledge picture settings update"}
+                if "ai_Picture" in payload["settings"]:
+                    return {"status": "error", "message": "category, aiPicture doesn't support the key(s): undefined"}
+                if "gameGenre" in payload["settings"]:      # written on the internal route: no read-back
+                    return {"status": "ok", "picture_settings": payload["settings"], "readback_confirmed": False}
+                return {"status": "ok", "picture_settings": payload["settings"], "readback_confirmed": True}
         lg = FakeLG()
         missed, out = quiet(app.setup_gaming, lg, 3, sleep=lambda _s: None, vendor=lambda: "",
                             ask_input=lambda _p: "2")      # AMD, asked because it could not tell
@@ -480,6 +484,8 @@ class Cleanup(unittest.TestCase):
                        {"brightness": "50"}, {"peakBrightness": "high"}, {"color": "50"}):
             self.assertIn(wanted, written)
         self.assertNotIn("run this again", out)
+        self.assertIn("n/a   AI Picture Pro", out)
+        self.assertIn("sent  Game Genre Standard", out)
         self.assertTrue(app.matches([5, 0], ["5", "0"]) and not app.matches([5, 0], [0, 0]))
 
     def test_the_graphics_card_is_read_from_windows(self):

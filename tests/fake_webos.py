@@ -81,10 +81,21 @@ class FakeWebOS:
                                      "logoLuminanceAdjust": "strong"},
                          "other": {"gameMode": {"hdmi1": "off", "hdmi2": "off"}}, "aiPicture": {}}
         self.input = "HDMI_1"
+        self.locked: set[str] = set()         # keys the public settings route refuses (as a G2 does)
         # A 2021 C1 by default; set_model() makes it another generation.
         self.model, self.platform, self.product = "OLED65C1FAKE", "HE_DTV_W21O_AFABATAA", "webOSTV 6.0"
         self.running = True
         threading.Thread(target=self._accept, daemon=True).start()
+
+    def store(self, payload: dict) -> None:
+        store = self.settings.setdefault(payload.get("category"), {})
+        for key, value in (payload.get("settings") or {}).items():
+            if isinstance(value, dict):
+                store.setdefault(key, {}).update(value)
+            else:
+                store[key] = value
+        if self.settings["other"].get("gameMode", {}).get(self.input.replace("HDMI_", "hdmi")) == "on":
+            self.settings["picture"]["pictureMode"] = "game"     # Game Optimizer takes over the input
 
     def set_model(self, model: str, platform: str, product: str) -> None:
         self.model, self.platform, self.product = model, platform, product
@@ -164,7 +175,10 @@ class FakeWebOS:
                 "returnValue": True, "product_name": self.product, "model_name": self.platform,
                 "major_ver": "03", "minor_ver": "20.00", "device_id": "aa:bb:cc:dd:ee:ff"}}))
         elif uri == "ssap://system.notifications/createAlert":
-            self.alerts.append((message.get("payload") or {}).get("onclose") or {})
+            call = (message.get("payload") or {}).get("onclose") or {}
+            self.alerts.append(call)
+            if call.get("uri") == "luna://com.webos.settingsservice/setSystemSettings":
+                self.store(call.get("params") or {})
             conn.sendall(frame({"type": "response", "id": mid, "payload": {
                 "returnValue": True, "alertId": f"com.webos.service.apiadapter.pub-{len(self.alerts)}"}}))
         elif uri == "ssap://system.notifications/closeAlert":
@@ -176,14 +190,12 @@ class FakeWebOS:
                 "returnValue": True, "settings": {k: store[k] for k in payload.get("keys") or [] if k in store}}}))
         elif uri == "ssap://settings/setSystemSettings":
             payload = message.get("payload") or {}
-            store = self.settings.setdefault(payload.get("category"), {})
-            for key, value in (payload.get("settings") or {}).items():
-                if isinstance(value, dict):
-                    store.setdefault(key, {}).update(value)
-                else:
-                    store[key] = value
-            if store.get("gameMode", {}).get(self.input.replace("HDMI_", "hdmi")) == "on":
-                self.settings["picture"]["pictureMode"] = "game"     # Game Optimizer takes over the input
+            locked = sorted(set(payload.get("settings") or {}) & self.locked)
+            if locked:
+                conn.sendall(frame({"type": "error", "id": mid, "error": "500 Application error: Some keys are not "
+                                    f"allowed for the request. ( {', '.join(locked)} )"}))
+                return
+            self.store(payload)
             conn.sendall(frame({"type": "response", "id": mid, "payload": {"returnValue": True}}))
         elif uri == "ssap://tv/getExternalInputList":
             conn.sendall(frame({"type": "response", "id": mid, "payload": {"returnValue": True, "devices": [

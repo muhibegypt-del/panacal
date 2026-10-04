@@ -964,9 +964,17 @@ def setup_gaming(lg: LG, hdmi: int, sleep=time.sleep, ask_input=input, vendor=gp
         missed = []
         for category, values, name in items:
             result = lg.picture_settings_set({"settings": values, "category": category, "keep_calibration_mode": False})
+            message = result.get("message") or ""
+            if result.get("status") != "ok" and "support the key" in message:
+                say(f"  n/a   {name} (this picture mode does not have it)")
+                continue
+            if result.get("status") == "ok" and result.get("readback_confirmed") is False:
+                # Written through LG's internal settings route, which cannot answer.
+                say(f"  sent  {name} (the TV cannot report it back)")
+                continue
             ok = result.get("status") == "ok" and all(
                 matches(v, (result.get("picture_settings") or {}).get(k)) for k, v in values.items())
-            say(f"  {'done ' if ok else 'NOT  '} {name}" + ("" if ok else f" ({result.get('message') or 'not confirmed'})"))
+            say(f"  {'done ' if ok else 'NOT  '} {name}" + ("" if ok else f" ({message or 'not confirmed'})"))
             if not ok:
                 missed.append(name)
         return missed
