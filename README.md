@@ -48,6 +48,8 @@ Whenever a run stops, the last lines say why, what state the TV was left in (unt
 
 **LG Service Menu.bat** opens the TV's service menu (In-Start, or EZ Adjust) so you can make adjustments by hand with the remote. The password is usually 0413. Write down every value before you change it: LG AutoCal and Undo do not put service menu settings back, and a wrong value can damage the panel or void the warranty.
 
+**LG Game Setup.bat** switches the TV to HDMI 2 and sets it up for gaming the usual way (RTINGS' G2 recommendations): Game Optimizer on that input, HDMI Ultra HD Deep Colour, Instant Game Response, VRR & G-Sync, AMD FreeSync Premium, Prevent Input Delay on Boost, Energy Saving off and Adjust Logo Brightness on Low. Each setting is written and read back, and anything the TV did not take is listed. HGIG belongs to the HDR game mode, so run it once more while an HDR game is on screen. Another input: `"game_hdmi": 3` in `settings.json`.
+
 **LG OLED Dimming.bat** switches off (or back on) the dimming LG OLEDs apply to a picture that stays still: TPC and GSR in the In-Start menu, without needing a service remote. It stops the screen fading on static content; it does not raise peak brightness, and it removes protection against burn-in. The TV cannot report these settings back, so check them afterwards in **LG Service Menu.bat** (In-Start, then OLED).
 
 Each run keeps everything in `sessions\<date_time>\`: `console.txt` (what the window showed), every reading and TV request, the worker's log and state, and `verification.json`.
@@ -64,6 +66,7 @@ Copy `settings.example.json` to `settings.json` only to change a default. The fi
 | `tv_ip` | found automatically | For networks where discovery is blocked. |
 | `patch_size` | `10` | Patch window as a percentage of screen area. |
 | `meter.ccss` | found automatically | A specific correction file. |
+| `game_hdmi` | `2` | The HDMI input LG Game Setup sets up. |
 | `madvr` | found or downloaded | A madVR folder (with `madTPG.exe`) to use for HDR patterns. |
 | `meter.floor_cd_m2` | `0.3` | Dimmest level the meter is trusted to steer. Lower it for an i1Display Pro (about `0.01`); `0` lets the worker calibrate every level. |
 | `reset_picture_mode` | `true` | `false` keeps your other picture settings; the white balance and LUTs are still cleared first. |

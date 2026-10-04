@@ -865,6 +865,63 @@ def set_oled_dimming(lg: LG, ask_input=input) -> None:
         + ("On." if enable else "Off."))
 
 
+def game_settings(hdmi: int, hdr: bool) -> list[tuple[str, dict, str]]:
+    """The usual LG G2 gaming setup (RTINGS' G2 settings; key names and values
+    as ColorControl sends them): (category, settings, name on the TV)."""
+    other = [("other", {"gameMode": {f"hdmi{hdmi}": "on"}}, f"Game Optimizer on HDMI {hdmi}"),
+             ("other", {f"uhdDeepColorHDMI{hdmi}": "on"}, f"HDMI {hdmi} Ultra HD Deep Colour (4K 120 Hz, HDR)"),
+             ("other", {"enableALLM": "on"}, "Instant Game Response (ALLM)"),
+             ("other", {"gameOptimization": "on"}, "VRR & G-Sync"),
+             ("other", {"freesync": "on"}, "AMD FreeSync Premium"),
+             ("other", {"inputOptimization": "boost"}, "Prevent Input Delay: Boost")]
+    picture = [("picture", {"energySaving": "off"}, "Energy Saving off"),
+               ("picture", {"logoLuminanceAdjust": "light"}, "Adjust Logo Brightness: Low")]
+    if hdr:
+        picture.append(("picture", {"hdrDynamicToneMapping": "HGIG"}, "HDR tone mapping: HGIG"))
+    return other + picture
+
+
+def matches(wanted, got) -> bool:
+    if isinstance(wanted, dict):
+        return isinstance(got, dict) and all(matches(v, got.get(k)) for k, v in wanted.items())
+    return str(got).lower() == str(wanted).lower()
+
+
+def setup_gaming(lg: LG, hdmi: int, sleep=time.sleep) -> list[str]:
+    """Game Optimizer and its settings on one HDMI input, through the same
+    picture_set path calibration uses (each setting written, then read back).
+    Returns the names of the settings the TV did not confirm."""
+    say(f"Switching the TV to HDMI {hdmi} ...")
+    switched = lg.switch_input(hdmi)
+    if switched.get("status") != "ok":
+        raise SystemExit(f"The TV did not switch to HDMI {hdmi} ({switched.get('message') or 'no answer'}).")
+    sleep(3)
+
+    def apply(items) -> list[str]:
+        missed = []
+        for category, values, name in items:
+            result = lg.picture_settings_set({"settings": values, "category": category, "keep_calibration_mode": False})
+            ok = result.get("status") == "ok" and all(
+                matches(v, (result.get("picture_settings") or {}).get(k)) for k, v in values.items())
+            say(f"  {'done ' if ok else 'NOT  '} {name}" + ("" if ok else f" ({result.get('message') or 'not confirmed'})"))
+            if not ok:
+                missed.append(name)
+        return missed
+
+    items = game_settings(hdmi, hdr=False)
+    missed = apply([i for i in items if i[0] == "other"])
+    sleep(2)                           # Game Optimizer switches the picture mode
+    mode = lg.current_picture_mode()
+    hdr = mode.lower().startswith("hdr")
+    if mode not in ("game", "hdrGame"):
+        say(f"  The TV is in picture mode '{mode or 'unknown'}', not Game Optimizer.")
+    missed += apply([i for i in game_settings(hdmi, hdr) if i[0] == "picture"])
+    if not hdr:
+        say("HDR games: HGIG is set per HDR mode, so start an HDR game on this input and run this again "
+            "to set it. Then do the console's or game's own HDR calibration.")
+    return missed
+
+
 def pair_or_undo(settings: dict, command: str) -> int:
     with Session(suffix="_" + command) as session:
         try:
@@ -875,6 +932,10 @@ def pair_or_undo(settings: dict, command: str) -> int:
                 open_service_menu(lg)
             if command == "dimming":
                 set_oled_dimming(lg)
+            if command == "game":
+                missed = setup_gaming(lg, int(settings.get("game_hdmi") or 2))
+                say("Game setup done." if not missed else
+                    "Game setup done, except: " + ", ".join(missed) + ". Set those on the TV by hand.")
             if command == "undo":
                 lg.clear_stale_calibration_mode()
                 mode = choose_picture_mode(lg, settings)
@@ -897,17 +958,18 @@ def pair_or_undo(settings: dict, command: str) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="LG OLED AutoCal on a PC (PGenerator-Plus worker)")
-    parser.add_argument("command", nargs="?", default="run", choices=["run", "colour", "hdr", "pair", "undo", "service", "dimming"],
+    parser.add_argument("command", nargs="?", default="run", choices=["run", "colour", "hdr", "pair", "undo", "service", "dimming", "game"],
                         help="run (default): greyscale then colour; colour: only the colour stage, keeping "
                              "the greyscale in the TV; hdr: HDR10 greyscale and colour with madTPG patterns; "
                              "pair: find the TV and pair it again with a new PIN; "
                              "undo: clear the mode's white balance and LUTs; "
                              "service: open the TV's service menu for adjustments by hand; "
-                             "dimming: switch the OLED auto-dimming (TPC and GSR) off or on")
+                             "dimming: switch the OLED auto-dimming (TPC and GSR) off or on; "
+                             "game: Game Optimizer and the usual gaming settings on one HDMI input")
     args = parser.parse_args(argv)
     console_click_proof()
     settings = load_settings()
-    if args.command in ("pair", "undo", "service", "dimming"):
+    if args.command in ("pair", "undo", "service", "dimming", "game"):
         return pair_or_undo(settings, args.command)
     if args.command == "colour":
         return run(settings, stages=("colour",))

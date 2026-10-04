@@ -77,6 +77,10 @@ class FakeWebOS:
         self.log: list[str] = []
         self.payloads: dict[str, dict] = {}     # the last payload sent to each URI
         self.alerts: list[dict] = []           # internal (luna://) calls sent through the alert bridge
+        self.settings = {"picture": {"pictureMode": "expert2", "energySaving": "auto",
+                                     "logoLuminanceAdjust": "strong"},
+                         "other": {"gameMode": {"hdmi1": "off", "hdmi2": "off"}}}
+        self.input = "HDMI_1"
         self.running = True
         threading.Thread(target=self._accept, daemon=True).start()
 
@@ -159,6 +163,29 @@ class FakeWebOS:
             conn.sendall(frame({"type": "response", "id": mid, "payload": {
                 "returnValue": True, "alertId": f"com.webos.service.apiadapter.pub-{len(self.alerts)}"}}))
         elif uri == "ssap://system.notifications/closeAlert":
+            conn.sendall(frame({"type": "response", "id": mid, "payload": {"returnValue": True}}))
+        elif uri == "ssap://settings/getSystemSettings":
+            payload = message.get("payload") or {}
+            store = self.settings.get(payload.get("category"), {})
+            conn.sendall(frame({"type": "response", "id": mid, "payload": {
+                "returnValue": True, "settings": {k: store[k] for k in payload.get("keys") or [] if k in store}}}))
+        elif uri == "ssap://settings/setSystemSettings":
+            payload = message.get("payload") or {}
+            store = self.settings.setdefault(payload.get("category"), {})
+            for key, value in (payload.get("settings") or {}).items():
+                if isinstance(value, dict):
+                    store.setdefault(key, {}).update(value)
+                else:
+                    store[key] = value
+            if store.get("gameMode", {}).get(self.input.replace("HDMI_", "hdmi")) == "on":
+                self.settings["picture"]["pictureMode"] = "game"     # Game Optimizer takes over the input
+            conn.sendall(frame({"type": "response", "id": mid, "payload": {"returnValue": True}}))
+        elif uri == "ssap://tv/getExternalInputList":
+            conn.sendall(frame({"type": "response", "id": mid, "payload": {"returnValue": True, "devices": [
+                {"id": f"HDMI_{n}", "label": f"HDMI {n}", "appId": f"com.webos.app.hdmi{n}", "connected": True}
+                for n in (1, 2, 3, 4)]}}))
+        elif uri == "ssap://tv/switchInput":
+            self.input = (message.get("payload") or {}).get("inputId") or self.input
             conn.sendall(frame({"type": "response", "id": mid, "payload": {"returnValue": True}}))
         elif uri == "ssap://system.launcher/launch":
             conn.sendall(frame({"type": "response", "id": mid, "payload": {

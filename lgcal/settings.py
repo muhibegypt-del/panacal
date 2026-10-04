@@ -15,7 +15,7 @@ from .steps import PICTURE_MODES, TARGET_GAMMAS
 
 DEFAULTS = {"target_gamma": "bt1886", "target_delta_e": 0.5, "patch_size": 10, "api_port": 8765,
             "reset_picture_mode": True, "picture_mode": "", "tv_ip": "", "perl": "", "argyll_bin": "",
-            "pattern_insertion": True, "madvr": "", "meter": {}}
+            "pattern_insertion": True, "madvr": "", "game_hdmi": 2, "meter": {}}
 METER_DEFAULTS = {"ccss": "", "spotread": "", "args": ["-e"], "display_type": "oled", "synthetic_black": True,
                   "floor_cd_m2": 0.3}
 IGNORED = {"_comment"}
@@ -83,6 +83,7 @@ def validate(raw) -> tuple[dict, list[str]]:
     out["api_port"] = _number(merged["api_port"], "api_port", 1024, 65535, errors, integer=True)
     out["reset_picture_mode"] = _bool(merged["reset_picture_mode"], "reset_picture_mode", errors)
     out["pattern_insertion"] = _bool(merged["pattern_insertion"], "pattern_insertion", errors)
+    out["game_hdmi"] = _number(merged["game_hdmi"], "game_hdmi", 1, 4, errors, integer=True)
 
     mode = merged["picture_mode"] or ""
     if mode and mode not in PICTURE_MODES:

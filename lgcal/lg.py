@@ -421,6 +421,7 @@ class LG:
                 return held
         result = self.run_helper({
             "action": "picture_set", "ip": ip, "client_key": key, "settings": settings,
+            "category": payload.get("category") or "picture",
             "readback_keys": readback_keys, "picture_mode": picture_mode,
             "signal_mode": payload.get("signal_mode") or "", "tv_input": "",
             "keep_calibration_mode": 1 if keep else 0,
@@ -677,6 +678,14 @@ class LG:
         _clients, ip, key = ready
         return self.run_helper({"action": "remote_control", "ip": ip, "client_key": key,
                                 "command": "dimming_on" if enable else "dimming_off", "connect_timeout": 5})
+
+    def switch_input(self, hdmi: int) -> dict:
+        ready, error = self._ready({}, "switching input")
+        if error:
+            return error
+        _clients, ip, key = ready
+        return self.run_helper({"action": "remote_control", "ip": ip, "client_key": key, "command": "input",
+                                "target_input": f"hdmi{hdmi}", "connect_timeout": 5})
 
     # --- pairing (used by the launcher) ------------------------------------
     def probe(self, ip: str) -> dict:

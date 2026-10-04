@@ -2716,6 +2716,7 @@ sub lg_settings_error_is_unsupported_key (@) {
 ###############################################
 #        LG Calibration / 1D LUT DDC          #
 ###############################################
+$PICTURE_SET_CATEGORY="picture"; # PC-PORT: picture_set's settings category (request "category")
 $LG_DDC_DIR=($ENV{"PGEN_LG_DATA_DIR"}||"/var/lib/PGenerator/lg")."/ddc"; # PC-PORT
 $LG_DDC_1D_MIN_STEP_UNITS=64;
 $LG_DDC_1D_STEP_RATIO=0.018;
@@ -6587,11 +6588,11 @@ sub lg_picture_set_workflow (@) {
  }
 
  my $set_payload={
-	  category => "picture",
+	  category => $PICTURE_SET_CATEGORY, # PC-PORT: "other" holds Game Optimizer settings
 	  settings => $settings_to_apply,
 	 };
  my $panel_light_category=($panel_light_only && $tv_input ne "" && $active_picture_mode ne "") ? "picture\$".$tv_input.".".$active_picture_mode.".2d.x" : "";
- $set_payload->{"dimension"}={ pictureMode => $active_picture_mode } if($active_picture_mode ne "" && !$panel_light_only);
+ $set_payload->{"dimension"}={ pictureMode => $active_picture_mode } if($active_picture_mode ne "" && !$panel_light_only && $PICTURE_SET_CATEGORY eq "picture"); # PC-PORT
 
  &diag_log_append("picture_set:request",{
   ip => $ip,
@@ -6895,7 +6896,7 @@ sub lg_picture_set_workflow (@) {
 	    select(undef,undef,undef,0.4) if($read_attempt<13);
 	   }
 	  } else {
-	   my $readback_category="picture";
+	   my $readback_category=$PICTURE_SET_CATEGORY; # PC-PORT
 		   if(!$native_white_balance && $tv_input ne "" && $active_picture_mode ne "") {
 	    $readback_category="picture\$".$tv_input.".".$active_picture_mode.".2d.x";
 	   }
@@ -7766,6 +7767,7 @@ sub main (@) {
 	 } elsif($action eq "picture_get") {
 	  $result=&lg_picture_get_workflow($ip,$client_key,$connect_timeout,$keys,$picture_mode,$tv_input,$force_ddc_white_balance,$signal_mode,$include_current_input);
 	 } elsif($action eq "picture_set") {
+  $PICTURE_SET_CATEGORY=($request->{"category"}||"") eq "other" ? "other" : "picture"; # PC-PORT
 		  $result=&lg_picture_set_workflow($ip,$client_key,$connect_timeout,$settings,$readback_keys,$tv_input,$keep_calibration_mode,$picture_mode,$calibration_mode_active,$reset_ddc_baseline,$verify_ddc_upload,$force_ddc_white_balance,$signal_mode);
  } elsif($action eq "picture_reset") {
   $result=&lg_picture_reset_workflow($ip,$client_key,$connect_timeout,$tv_input,$picture_mode,$signal_mode,$require_white_balance_reset,$reset_ddc_state);

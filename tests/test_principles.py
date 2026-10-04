@@ -452,6 +452,28 @@ class Cleanup(unittest.TestCase):
             quiet(app.set_oled_dimming, FakeLG(), lambda _p: "1")
         self.assertIn("Pair LG TV.bat", str(stop.exception))
 
+    def test_game_setup_in_hdr_sets_hgig_and_reports_what_the_tv_refused(self):
+        class FakeLG:
+            writes = []
+
+            def switch_input(self, hdmi):
+                return {"status": "ok"}
+
+            def current_picture_mode(self):
+                return "hdrGame"
+
+            def picture_settings_set(self, payload):
+                self.writes.append(payload)
+                if "freesync" in payload["settings"]:
+                    return {"status": "error", "message": "doesn't support the key(s): freesync"}
+                return {"status": "ok", "picture_settings": payload["settings"]}
+        lg = FakeLG()
+        missed, out = quiet(app.setup_gaming, lg, 3, sleep=lambda _s: None)
+        self.assertEqual(missed, ["AMD FreeSync Premium"])
+        self.assertIn({"hdrDynamicToneMapping": "HGIG"}, [w["settings"] for w in lg.writes])
+        self.assertIn({"gameMode": {"hdmi3": "on"}}, [w["settings"] for w in lg.writes])
+        self.assertNotIn("run this again", out)
+
     def test_every_bat_the_messages_name_exists(self):
         import re
         root = Path(__file__).resolve().parent.parent

@@ -310,6 +310,23 @@ class TransportTests(unittest.TestCase):
                              {"id": "com.webos.app.factorywin", "params": {"id": "executeFactory", "irKey": key}})
             self.assertIn("0413", out.getvalue())
 
+    def test_game_setup_goes_through_the_calibration_settings_path(self):
+        from tests.fake_webos import PIN
+        lg = LG(PERL, app.HELPER, app.DATA_DIR, lambda _m: None, app.perl_env(None, None))
+        app.find_tv(lg, {"tv_ip": "127.0.0.1"}, pin_input=lambda _p: PIN)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            missed = app.setup_gaming(lg, 2, sleep=lambda _s: None)
+        self.assertEqual(missed, [], out.getvalue())
+        self.assertEqual(self.tv.input, "HDMI_2")
+        other, picture = self.tv.settings["other"], self.tv.settings["picture"]
+        self.assertEqual(other["gameMode"], {"hdmi1": "off", "hdmi2": "on"})
+        self.assertEqual((other["uhdDeepColorHDMI2"], other["enableALLM"], other["gameOptimization"],
+                          other["freesync"], other["inputOptimization"]), ("on", "on", "on", "on", "boost"))
+        self.assertEqual((picture["pictureMode"], picture["energySaving"], picture["logoLuminanceAdjust"]),
+                         ("game", "off", "light"))
+        self.assertNotIn("hdrDynamicToneMapping", picture)        # only in an HDR mode
+        self.assertIn("run this again", out.getvalue())
+
     def test_oled_dimming_switches_tpc_and_gsr_through_the_real_helper(self):
         from tests.fake_webos import PIN
         lg = LG(PERL, app.HELPER, app.DATA_DIR, lambda _m: None, app.perl_env(None, None))
