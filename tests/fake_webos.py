@@ -181,6 +181,9 @@ class FakeWebOS:
             store = self.settings.get(payload.get("category"), {})
             conn.sendall(frame({"type": "response", "id": mid, "payload": {
                 "returnValue": True, "settings": {k: store[k] for k in payload.get("keys") or [] if k in store}}}))
+        elif uri == "ssap://settings/setSystemSettings":
+            self.store(message.get("payload") or {})
+            conn.sendall(frame({"type": "response", "id": mid, "payload": {"returnValue": True}}))
         elif uri == "ssap://tv/switchInput":
             self.input = (message.get("payload") or {}).get("inputId") or self.input
             conn.sendall(frame({"type": "response", "id": mid, "payload": {"returnValue": True}}))

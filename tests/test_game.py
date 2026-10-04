@@ -15,8 +15,8 @@ from lgcal import game
 
 class FakeClient:
     """bscpylgtv's WebOsClient as the setup uses it."""
-    def __init__(self, mode="expert2", stored=None):
-        self.calls, self.mode, self.stored = [], mode, dict(stored or {})
+    def __init__(self, mode="expert2", stored=None, refuse=()):
+        self.calls, self.mode, self.stored, self.refuse = [], mode, dict(stored or {}), set(refuse)
 
     async def set_input(self, input):
         self.calls.append(("set_input", input))
@@ -24,14 +24,19 @@ class FakeClient:
     async def set_device_info(self, input, icon, label):
         self.calls.append(("set_device_info", input, icon, label))
 
-    async def set_settings(self, category, settings, current_app=None):
-        self.calls.append(("set_settings", category, settings, current_app))
-        if settings.get("gameMode") and self.mode != "hdrGame":
-            self.mode = "game"
-        self.stored.update({k: v for k, v in settings.items() if k not in self.stored or k == "pictureMode"})
+    async def set_system_settings(self, category, settings, current_app=None):
+        if self.refuse & set(settings):
+            raise RuntimeError("Some keys are not allowed for the request.")
+        self.calls.append(("public", category, settings, current_app))
+        self.stored.update({k: v for k, v in settings.items() if k not in self.stored})
 
-    async def set_current_picture_mode(self, mode):
-        self.mode = mode
+    async def set_settings(self, category, settings, current_app=None):
+        self.calls.append(("internal", category, settings))
+        if "pictureMode" in settings:
+            self.mode = settings["pictureMode"]
+
+    async def button(self, name):
+        self.calls.append(("button", name))
 
     async def enable_tpc_or_gsr(self, algo, enable=True):
         self.calls.append(("tpc_gsr", algo, enable))
@@ -47,31 +52,41 @@ def run(client, gpu="nvidia"):
     return missed, "\n".join(said), client.calls
 
 
+def sent(calls, route):
+    return {k: v for c in calls if c[0] == route for k, v in c[2].items()}
+
+
 class Setup(unittest.TestCase):
-    def test_pc_mode_game_optimizer_and_every_setting_in_one_go(self):
+    def test_the_routes_and_order_of_bscpylgtvs_own_g2_scripts(self):
         missed, text, calls = run(FakeClient())
         self.assertEqual(missed, [], text)
-        self.assertEqual(calls[:3], [("set_input", "HDMI_2"), ("set_device_info", "HDMI_2", "pc", "PC"),
-                                     ("set_settings", "other", {"gameMode": {"hdmi2": "on"}}, None)])
-        sent = {k: v for c in calls if c[0] == "set_settings" for k, v in c[2].items()}
-        self.assertEqual((sent["inputOptimization"], sent["gameOptimizationHDMI2"], sent["freesyncOLEDHDMI2"],
-                          sent["gamma"], sent["colorTemperature"], sent["contrast"], sent["brightness"]),
-                         ("on", "on", "off", "medium", -45, 85, 49))
-        self.assertNotIn("hdrDynamicToneMapping", sent)
-        self.assertIn(("set_settings", "picture", {"truMotionMode": "off"}, True), calls)
+        self.assertEqual(calls[:2], [("set_input", "HDMI_2"), ("set_device_info", "HDMI_2", "pc", "PC")])
+        self.assertEqual(calls[2:4], [("internal", "picture", {"pictureMode": "game"}), ("button", "ENTER")])
+        public, internal = sent(calls, "public"), sent(calls, "internal")
+        self.assertEqual((public["gamma"], public["colorTemperature"], public["contrast"], public["brightness"]),
+                         ("medium", "-45", "85", "49"))
+        self.assertIn(("public", "picture", {"truMotionMode": "off"}, True), calls)
+        self.assertEqual((internal["inputOptimization"], internal["gameOptimizationHDMI2"],
+                          internal["freesyncOLEDHDMI2"], internal["gameMode"], internal["logoLuminanceAdjust"]),
+                         ("on", "on", "off", {"hdmi2": "on"}, "off"))
+        # every internal write is followed by ENTER, as the G2 scripts do
+        for i, call in enumerate(calls):
+            if call[0] == "internal":
+                self.assertEqual(calls[i + 1], ("button", "ENTER"))
         self.assertIn(("tpc_gsr", "tpc", False), calls)
         self.assertIn(("tpc_gsr", "gsr", False), calls)
-        self.assertTrue(all(len(c[2]) == 1 for c in calls if c[0] == "set_settings"))   # one setting per call
 
     def test_hdr_game_mode_gets_the_hdr_column_and_amd_gets_freesync(self):
         _missed, _text, calls = run(FakeClient(mode="hdrGame"), gpu="amd")
-        sent = {k: v for c in calls if c[0] == "set_settings" for k, v in c[2].items()}
-        self.assertEqual((sent["hdrDynamicToneMapping"], sent["contrast"], sent["peakBrightness"],
-                          sent["freesyncOLEDHDMI2"], sent["gameOptimization"]), ("HGIG", 100, "high", "on", "off"))
+        public, internal = sent(calls, "public"), sent(calls, "internal")
+        self.assertEqual((public["hdrDynamicToneMapping"], public["contrast"], public["peakBrightness"],
+                          internal["freesyncOLEDHDMI2"], internal["gameOptimization"]), ("HGIG", "100", "high", "on", "off"))
+        self.assertNotIn("pictureMode", internal)
 
-    def test_a_setting_the_tv_kept_is_reported(self):
-        missed, _text, _calls = run(FakeClient(stored={"blackStabilizer": 13}))
-        self.assertEqual(missed, ["Black Stabiliser (the TV has 13)"])
+    def test_a_refused_or_kept_picture_setting_is_reported(self):
+        missed, _text, _calls = run(FakeClient(stored={"sharpness": "10"}, refuse={"blackLevel"}))
+        self.assertTrue(any(m.startswith("Video Range") for m in missed), missed)
+        self.assertIn('Sharpness (the TV has "10")', missed)
 
     def test_graphics_card_from_windows(self):
         class Done:
@@ -96,9 +111,15 @@ class RealLibrary(unittest.TestCase):
         self.addCleanup(shutil.rmtree, directory, True)
         tv = FakeWebOS(directory)
         self.addCleanup(tv.close)
+        from unittest import mock
+        from bscpylgtv import WebOsClient
+
+        async def enter(self, name, checkValid=True):
+            pass                                     # the fake TV has no pointer-input socket
         said = []
-        missed = game.run("127.0.0.1", str(directory / "keys.sqlite"), 2, said.append, vendor=lambda: "amd",
-                          client_key=KEY)
+        with mock.patch.object(WebOsClient, "button", enter):
+            missed = game.run("127.0.0.1", str(directory / "keys.sqlite"), 2, said.append, vendor=lambda: "amd",
+                              client_key=KEY)
         self.assertEqual(missed, [], "\n".join(said))
         self.assertEqual((tv.input, tv.devices["HDMI_2"]), ("HDMI_2", "pc.png"))
         other, picture = tv.settings["other"], tv.settings["picture"]

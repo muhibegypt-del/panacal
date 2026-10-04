@@ -879,8 +879,8 @@ def pair_or_undo(settings: dict, command: str) -> int:
                 from . import game
                 missed = game.run(lg.target_ip({}, lg.load_clients()), str(DATA_DIR / "bscpylgtv.sqlite"),
                                   int(settings.get("game_hdmi") or 2), say)
-                if missed:
-                    say("Not taken: " + "; ".join(missed))
+                say("Done. Glance once at Colour Temperature: it should read Warm 45." if not missed else
+                    "Done, except: " + "; ".join(missed))
                 say("For HDR: start an HDR game on this input and run this again; it then sets the HDR "
                     "settings with HGIG.")
             if command == "undo":
