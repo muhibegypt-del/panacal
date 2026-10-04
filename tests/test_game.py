@@ -97,7 +97,8 @@ class RealLibrary(unittest.TestCase):
         tv = FakeWebOS(directory)
         self.addCleanup(tv.close)
         said = []
-        missed = game.run("127.0.0.1", KEY, 2, said.append, vendor=lambda: "amd")
+        missed = game.run("127.0.0.1", str(directory / "keys.sqlite"), 2, said.append, vendor=lambda: "amd",
+                          client_key=KEY)
         self.assertEqual(missed, [], "\n".join(said))
         self.assertEqual((tv.input, tv.devices["HDMI_2"]), ("HDMI_2", "pc.png"))
         other, picture = tv.settings["other"], tv.settings["picture"]

@@ -877,7 +877,7 @@ def pair_or_undo(settings: dict, command: str) -> int:
                 set_oled_dimming(lg)
             if command == "game":
                 from . import game
-                missed = game.run(lg.target_ip({}, lg.load_clients()), lg.client_key(lg.load_clients()),
+                missed = game.run(lg.target_ip({}, lg.load_clients()), str(DATA_DIR / "bscpylgtv.sqlite"),
                                   int(settings.get("game_hdmi") or 2), say)
                 if missed:
                     say("Not taken: " + "; ".join(missed))

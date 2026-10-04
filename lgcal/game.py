@@ -144,7 +144,10 @@ async def setup(client, hdmi: int, gpu: str, say, sleep=asyncio.sleep) -> list[s
     return missed
 
 
-def run(ip: str, client_key: str, hdmi: int, say, ask_input=input, vendor=gpu_vendor) -> list[str]:
+def run(ip: str, key_file: str, hdmi: int, say, ask_input=input, vendor=gpu_vendor,
+        client_key: str | None = None) -> list[str]:
+    """bscpylgtv pairs itself, as bscpylgtvcommand does (the TV asks once to
+    allow it), and keeps its key in key_file."""
     from .app import choose_number
     gpu = vendor()
     if not gpu:
@@ -157,7 +160,10 @@ def run(ip: str, client_key: str, hdmi: int, say, ask_input=input, vendor=gpu_ve
     from bscpylgtv import WebOsClient
 
     async def main():
-        client = await WebOsClient.create(ip, client_key=client_key, ping_interval=None, states=[])
+        client = await WebOsClient.create(ip, key_file_path=key_file, client_key=client_key,
+                                          ping_interval=None, states=[])
+        if not client.client_key:
+            say("The TV will ask to allow a connection (first time only): accept it with the remote.")
         await client.connect()
         try:
             return await setup(client, hdmi, gpu, say)
