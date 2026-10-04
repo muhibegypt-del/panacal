@@ -58,7 +58,32 @@ def ensure_bscpylgtv(say) -> None:
     import importlib.util
     if importlib.util.find_spec("bscpylgtv") is None:
         say("Installing bscpylgtv (one time) ...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "--user", "--quiet", "--use-pep517", "bscpylgtv"], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "--user", "--quiet", "--use-pep517",
+                        "--no-warn-script-location", "--disable-pip-version-check", "bscpylgtv"], check=True)
+
+
+NAMES = {"gameMode": "Game Optimizer", "enableALLM": "ALLM", "inputOptimization": "Prevent Input Delay",
+         "gameOptimization": "VRR & G-Sync", "freesync": "AMD FreeSync Premium", "gameGenre": "Game Genre",
+         "blackStabilizer": "Black Stabiliser", "whiteStabilizer": "White Stabiliser",
+         "lowLevelAdjustment": "Fine Tune Dark Areas", "darkMode": "Dark Room Mode", "blueLight": "Reduce Blue Light",
+         "ai_Picture": "AI Picture Pro", "ai_Brightness": "AI Brightness", "ai_Genre": "AI Genre",
+         "energySaving": "Energy Saving", "logoLuminanceAdjust": "Adjust Logo Brightness",
+         "backlight": "OLED Pixel Brightness", "contrast": "Contrast", "brightness": "Black Level",
+         "dynamicContrast": "Auto Dynamic Contrast", "peakBrightness": "Peak Brightness", "gamma": "Gamma",
+         "color": "Colour Depth", "colorGamut": "Colour Gamut", "colorTemperature": "Colour Temperature",
+         "blackLevel": "Video Range", "motionEyeCare": "Motion Eye Care", "eyeComfortMode": "Reduce Blue Light",
+         "sharpness": "Sharpness", "superResolution": "Super Resolution", "noiseReduction": "Noise Reduction",
+         "mpegNoiseReduction": "MPEG Noise Reduction", "smoothGradation": "Smooth Gradation",
+         "realCinema": "Real Cinema", "motionProOLED": "OLED Motion", "truMotionMode": "TruMotion",
+         "hdrDynamicToneMapping": "Dynamic Tone Mapping"}
+
+
+def name(key: str) -> str:
+    for prefix in ("uhdDeepColorHDMI", "gameOptimizationHDMI", "freesyncOLEDHDMI"):
+        if key.startswith(prefix):
+            return {"uhdDeepColorHDMI": "Ultra HD Deep Colour", "gameOptimizationHDMI": "VRR & G-Sync",
+                    "freesyncOLEDHDMI": "AMD FreeSync Premium"}[prefix] + f" (HDMI {key[-1]})"
+    return NAMES.get(key, key)
 
 
 def same(wanted, got) -> bool:
@@ -103,16 +128,19 @@ async def setup(client, hdmi: int, gpu: str, say, sleep=asyncio.sleep) -> list[s
     await client.enable_tpc_or_gsr("gsr", False)
     await sleep(2)
     missed = [] if mode in ("game", "hdrGame") else [f"Game Optimizer (the TV is in {mode})"]
-    unread = 0
+    unconfirmed = []
     for category, values in sets + [("picture", {"truMotionMode": "off"})]:
         (key, value), = values.items()
         got = await read(client, category, key)
         if isinstance(got, Exception):
-            unread += 1
+            unconfirmed.append(name(key))
         elif not same(value, got):
-            missed.append(f"{key}: the TV has {json.dumps(got)}")
-    checked = len(sets) + 1 - unread
-    say(f"Read back {checked} of {len(sets) + 1} settings" + (f"; the TV would not read back {unread}." if unread else "."))
+            missed.append(f"{name(key)} (the TV has {json.dumps(got)})")
+    total = len(sets) + 1
+    say(f"Confirmed on the TV: {total - len(unconfirmed) - len(missed)} of {total} settings.")
+    if unconfirmed:
+        say("Sent, but the TV does not let a PC read these back, so check them once on the TV: "
+            + ", ".join(dict.fromkeys(unconfirmed)) + ".")
     return missed
 
 

@@ -71,7 +71,7 @@ class Setup(unittest.TestCase):
 
     def test_a_setting_the_tv_kept_is_reported(self):
         missed, _text, _calls = run(FakeClient(stored={"blackStabilizer": 13}))
-        self.assertEqual(missed, ["blackStabilizer: the TV has 13"])
+        self.assertEqual(missed, ["Black Stabiliser (the TV has 13)"])
 
     def test_graphics_card_from_windows(self):
         class Done:
