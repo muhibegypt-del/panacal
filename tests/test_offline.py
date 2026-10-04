@@ -310,43 +310,6 @@ class TransportTests(unittest.TestCase):
                              {"id": "com.webos.app.factorywin", "params": {"id": "executeFactory", "irKey": key}})
             self.assertIn("0413", out.getvalue())
 
-    def test_game_setup_goes_through_the_calibration_settings_path(self):
-        from tests.fake_webos import PIN
-        self.tv.set_model("OLED55G26LA", "HE_DTV_W22O_AFABATAA", "webOSTV 7.0")     # a 2022 G2
-        # The keys a real G2 refused on the public route (its first run of LG Game Setup).
-        self.tv.locked = {"hdmiPcMode", "gameMode", "enableALLM", "gameOptimization", "gameOptimizationHDMI2",
-                          "freesync", "freesyncOLEDHDMI2", "inputOptimization", "gameGenre", "blackStabilizer",
-                          "whiteStabilizer", "lowLevelAdjustment", "darkMode", "blueLight", "logoLuminanceAdjust",
-                          "eyeComfortMode", "motionProOLED"}
-        lg = LG(PERL, app.HELPER, app.DATA_DIR, lambda _m: None, app.perl_env(None, None))
-        app.find_tv(lg, {"tv_ip": "127.0.0.1"}, pin_input=lambda _p: PIN)
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            missed = app.setup_gaming(lg, 2, sleep=lambda _s: None, vendor=lambda: "nvidia",
-                                      ask_input=lambda _p: self.fail("asked for the graphics card"))
-        self.assertEqual(missed, [], out.getvalue())
-        self.assertEqual(self.tv.input, "HDMI_2")
-        other, picture, ai = self.tv.settings["other"], self.tv.settings["picture"], self.tv.settings["aiPicture"]
-        self.assertEqual(other["gameMode"], {"hdmi1": "off", "hdmi2": "on"})
-        self.assertEqual(other["hdmiPcMode"], {"hdmi2": True})
-        self.assertEqual((other["uhdDeepColorHDMI2"], other["enableALLM"], other["gameOptimizationHDMI2"],
-                          other["freesyncOLEDHDMI2"], other["inputOptimization"], other["gameGenre"],
-                          other["blackStabilizer"], other["whiteStabilizer"]),
-                         ("on", "on", "on", "off", "on", "Standard", 10, 10))
-        self.assertEqual(ai, {"ai_Picture": "off", "ai_Brightness": "off", "ai_Genre": "off"})
-        self.assertEqual((picture["pictureMode"], picture["energySaving"], picture["logoLuminanceAdjust"],
-                          picture["contrast"], picture["brightness"], picture["color"], picture["peakBrightness"],
-                          picture["gamma"], picture["colorTemperature"], picture["blackLevel"]["unknown"]),
-                         ("game", "off", "off", "85", "49", "55", "off", "medium", "-45", "auto"))
-        self.assertNotIn("adjustingLuminance", picture)            # a 2022 set has no 2.5% point
-        self.assertNotIn("hdrDynamicToneMapping", picture)         # only in an HDR mode
-        internal = {k for a in self.tv.alerts if a.get("uri") == "luna://com.webos.settingsservice/setSystemSettings"
-                    for k in a["params"]["settings"]}
-        self.assertEqual(internal, self.tv.locked)       # exactly the refused keys took the internal route
-        self.assertEqual([a["uri"] for a in self.tv.alerts][-2:],
-                         ["luna://com.webos.service.oledepl/setTemporalPeakControl",
-                          "luna://com.webos.service.oledepl/setGlobalStressReduction"])
-        self.assertIn("run this again", out.getvalue())
-
     def test_oled_dimming_switches_tpc_and_gsr_through_the_real_helper(self):
         from tests.fake_webos import PIN
         lg = LG(PERL, app.HELPER, app.DATA_DIR, lambda _m: None, app.perl_env(None, None))

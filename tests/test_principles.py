@@ -452,51 +452,6 @@ class Cleanup(unittest.TestCase):
             quiet(app.set_oled_dimming, FakeLG(), lambda _p: "1")
         self.assertIn("Pair LG TV.bat", str(stop.exception))
 
-    def test_game_setup_in_hdr_sets_hgig_and_reports_what_the_tv_refused(self):
-        class FakeLG:
-            writes = []
-
-            def switch_input(self, hdmi):
-                return {"status": "ok"}
-
-            def current_picture_mode(self):
-                return "hdrGame"
-
-            def oled_dimming(self, enable):
-                return {"status": "ok"}
-
-            def picture_settings_set(self, payload):
-                self.writes.append(payload)
-                if "freesync" in payload["settings"]:
-                    return {"status": "error", "message": "LG TV did not acknowledge picture settings update"}
-                if "ai_Picture" in payload["settings"]:
-                    return {"status": "error", "message": "category, aiPicture doesn't support the key(s): undefined"}
-                if "gameGenre" in payload["settings"]:      # written on the internal route: no read-back
-                    return {"status": "ok", "picture_settings": payload["settings"], "readback_confirmed": False}
-                return {"status": "ok", "picture_settings": payload["settings"], "readback_confirmed": True}
-        lg = FakeLG()
-        missed, out = quiet(app.setup_gaming, lg, 3, sleep=lambda _s: None, vendor=lambda: "",
-                            ask_input=lambda _p: "2")      # AMD, asked because it could not tell
-        self.assertEqual(missed, ["AMD FreeSync Premium on"])
-        written = [w["settings"] for w in lg.writes]
-        for wanted in ({"hdrDynamicToneMapping": "HGIG"}, {"gameMode": {"hdmi3": "on"}}, {"hdmiPcMode": {"hdmi3": True}},
-                       {"gameOptimization": "off", "gameOptimizationHDMI3": "off"}, {"contrast": "100"},
-                       {"brightness": "50"}, {"peakBrightness": "high"}, {"color": "50"}):
-            self.assertIn(wanted, written)
-        self.assertNotIn("run this again", out)
-        self.assertIn("n/a   AI Picture Pro", out)
-        self.assertIn("sent  Game Genre Standard", out)
-        self.assertTrue(app.matches([5, 0], ["5", "0"]) and not app.matches([5, 0], [0, 0]))
-
-    def test_the_graphics_card_is_read_from_windows(self):
-        class Done:
-            def __init__(self, names):
-                self.stdout = names
-        for names, vendor in (("NVIDIA GeForce RTX 4080\nNVIDIA GeForce GT 710", "nvidia"),
-                              ("AMD Radeon RX 7900 XTX", "amd"),
-                              ("NVIDIA GeForce RTX 4080\nAMD Radeon(TM) Graphics", "")):
-            self.assertEqual(app.gpu_vendor(run=lambda *_a, **_k: Done(names)), vendor)
-
     def test_every_bat_the_messages_name_exists(self):
         import re
         root = Path(__file__).resolve().parent.parent
