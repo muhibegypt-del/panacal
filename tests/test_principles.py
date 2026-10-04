@@ -474,6 +474,8 @@ class Cleanup(unittest.TestCase):
         for wanted in ({"hdrDynamicToneMapping": "HGIG"}, {"gameMode": {"hdmi3": "on"}}, {"gameOptimization": "off"},
                        {"contrast": "100"}, {"brightness": "50"}, {"peakBrightness": "high"}, {"color": "50"}):
             self.assertIn(wanted, written)
+        self.assertFalse(any("adjustingLuminance" in w for w in written))      # the tweak is SDR only
+        self.assertTrue(app.matches([5, 0], ["5", "0"]) and not app.matches([5, 0], [0, 0]))
         self.assertNotIn("run this again", out)
 
     def test_every_bat_the_messages_name_exists(self):

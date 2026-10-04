@@ -882,7 +882,9 @@ def game_settings(hdmi: int, hdr: bool, source: str = "playstation") -> list[tup
     freesync = "on" if source in ("xbox", "amd") else "off"
     on = lambda key, value, name: ("other", {key: value}, name)
     pic = lambda key, value, name: ("picture", {key: value}, name)
-    other = [on("gameMode", {f"hdmi{hdmi}": "on"}, f"Game Optimizer on HDMI {hdmi}"),
+    pc = [on("hdmiPcMode", {f"hdmi{hdmi}": True}, f"PC mode on HDMI {hdmi} (the PC icon)")] \
+        if source in ("nvidia", "amd") else []
+    other = pc + [on("gameMode", {f"hdmi{hdmi}": "on"}, f"Game Optimizer on HDMI {hdmi}"),
              on(f"uhdDeepColorHDMI{hdmi}", "on", f"HDMI {hdmi} Ultra HD Deep Colour (4K)"),
              on("enableALLM", "on", "ALLM (Instant Game Response)"),
              on("gameOptimization", vrr, f"VRR & G-Sync {vrr}"),
@@ -911,12 +913,18 @@ def game_settings(hdmi: int, hdr: bool, source: str = "playstation") -> list[tup
                pic("motionProOLED", "off", "OLED Motion off")]
     if hdr:
         picture.append(pic("hdrDynamicToneMapping", "HGIG", "Dynamic Tone Mapping: HGIG"))
+    else:
+        # The sheet's 22-point tweak: +5 at 2.5% (ColorControl's order: 2.5, 5, 7.5, 10, 15 ... 100).
+        picture.append(("picture", {"whiteBalanceMethod": "22", "adjustingLuminance": [5] + [0] * 21},
+                        "22-point white balance: 2.5% +5"))
     return other + picture
 
 
 def matches(wanted, got) -> bool:
     if isinstance(wanted, dict):
         return isinstance(got, dict) and all(matches(v, got.get(k)) for k, v in wanted.items())
+    if isinstance(wanted, list):
+        return isinstance(got, list) and len(got) == len(wanted) and all(map(matches, wanted, got))
     return str(got).lower() == str(wanted).lower()
 
 

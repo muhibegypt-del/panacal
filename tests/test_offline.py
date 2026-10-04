@@ -325,7 +325,13 @@ class TransportTests(unittest.TestCase):
         self.assertEqual((picture["pictureMode"], picture["energySaving"], picture["logoLuminanceAdjust"],
                           picture["contrast"], picture["brightness"], picture["color"], picture["peakBrightness"]),
                          ("game", "off", "off", "85", "49", "55", "off"))
+        self.assertEqual((picture["whiteBalanceMethod"], picture["adjustingLuminance"]), ("22", [5] + [0] * 21))
+        self.assertNotIn("hdmiPcMode", other)                      # a PlayStation is not a PC
         self.assertNotIn("hdrDynamicToneMapping", picture)        # only in an HDR mode
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(app.setup_gaming(lg, 2, sleep=lambda _s: None, ask_input=lambda _p: "3"), [],
+                             out.getvalue())                       # NVIDIA PC
+        self.assertEqual(other["hdmiPcMode"], {"hdmi2": True})
         self.assertIn("run this again", out.getvalue())
 
     def test_oled_dimming_switches_tpc_and_gsr_through_the_real_helper(self):
