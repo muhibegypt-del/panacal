@@ -1,7 +1,8 @@
 """LG Game Setup: P40L0's optimized LG OLED gaming settings (TechOptimized
 sheet v19) for a PC on one HDMI input, sent with bscpylgtv
-(github.com/chros73/bscpylgtv) exactly as its README does it. Setting names
-and values are a 2022 LG's (bscpylgtv's C2 settings dump).
+(github.com/chros73/bscpylgtv) the way its own G2 preset scripts do.
+Setting names: bscpylgtv's C2 settings dump (the G2's generation); 4:4:4
+Pass Through came to the C2/G2 with LG's webOS 23 update (13.30.56).
 """
 from __future__ import annotations
 
@@ -47,12 +48,14 @@ def game_settings(hdmi: int, hdr: bool, gpu: str = "amd") -> dict[str, dict]:
     if hdr:
         picture["hdrDynamicToneMapping"] = "HGIG"
     else:
+        picture["whiteBalanceMethod"] = "22"                                    # 22 Points Signal Level (%)
         picture["adjustingLuminance"] = [5] + [0] * 21
     return {
         "picture": picture,
         # The public route refuses these three on a G2; the internal route takes them.
         "picture_internal": {"logoLuminanceAdjust": "off", "eyeComfortMode": "off", "motionProOLED": "off"},
         "other": {"gameMode": {f"hdmi{hdmi}": "on"}, f"uhdDeepColorHDMI{hdmi}": "on", "enableALLM": "on",
+                  f"444BypassHDMI{hdmi}": "on",                                        # 4:4:4 Pass Through (with PC icon)
                   "gameOptimization": vrr, f"gameOptimizationHDMI{hdmi}": vrr,
                   "freesync": freesync, f"freesyncOLEDHDMI{hdmi}": freesync,
                   "inputOptimization": "on",                                           # Prevent Input Delay: Boost
@@ -90,6 +93,7 @@ NAMES = {"gameMode": "Game Optimizer", "enableALLM": "ALLM", "inputOptimization"
          "realCinema": "Real Cinema", "motionProOLED": "OLED Motion", "truMotionMode": "TruMotion",
          "hdrDynamicToneMapping": "Dynamic Tone Mapping", "tint": "Tint",
          "filmMakerMode": "FILMMAKER Mode Auto Start", "screenShift": "Screen Move", "aspectRatio": "Aspect Ratio",
+         "whiteBalanceMethod": "White balance method (22 points)",
          "adjustingLuminance": "22-point tweak (2.5% +5)"}
 
 

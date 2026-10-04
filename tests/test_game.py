@@ -69,7 +69,8 @@ class Setup(unittest.TestCase):
         self.assertEqual((internal["inputOptimization"], internal["gameOptimizationHDMI2"],
                           internal["freesyncOLEDHDMI2"], internal["gameMode"], internal["logoLuminanceAdjust"]),
                          ("on", "off", "on", {"hdmi2": "on"}, "off"))   # AMD: FreeSync, not VRR
-        self.assertEqual(public["adjustingLuminance"], [5] + [0] * 21)       # 2.5% +5
+        self.assertEqual((public["whiteBalanceMethod"], public["adjustingLuminance"]), ("22", [5] + [0] * 21))
+        self.assertEqual(internal["444BypassHDMI2"], "on")             # webOS 23 update on the C2/G2
         # every internal write is followed by ENTER, as the G2 scripts do
         for i, call in enumerate(calls):
             if call[0] == "internal":
@@ -81,7 +82,7 @@ class Setup(unittest.TestCase):
         _missed, _text, calls = run(FakeClient(mode="hdrGame"))
         public, internal = sent(calls, "public"), sent(calls, "internal")
         self.assertEqual((public["hdrDynamicToneMapping"], public["contrast"], public["peakBrightness"],
-                          internal["freesync"], internal["gameOptimization"]), ("HGIG", "100", "high", "on", "off"))
+                          internal["freesyncOLEDHDMI2"], internal["gameOptimization"]), ("HGIG", "100", "high", "on", "off"))
         self.assertNotIn("adjustingLuminance", public)
         self.assertNotIn("pictureMode", internal)
 
@@ -143,3 +144,4 @@ class RealLibrary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
