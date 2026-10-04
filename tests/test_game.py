@@ -48,7 +48,7 @@ class FakeClient:
 
 def run(client):
     said = []
-    missed = asyncio.run(game.setup(client, 2, said.append, sleep=lambda _s: asyncio.sleep(0)))
+    missed = asyncio.run(game.setup(client, 2, said.append, "amd", sleep=lambda _s: asyncio.sleep(0)))
     return missed, "\n".join(said), client.calls
 
 
@@ -68,7 +68,7 @@ class Setup(unittest.TestCase):
         self.assertIn(("public", "picture", {"truMotionMode": "off"}, True), calls)
         self.assertEqual((internal["inputOptimization"], internal["gameOptimizationHDMI2"],
                           internal["freesyncOLEDHDMI2"], internal["gameMode"], internal["logoLuminanceAdjust"]),
-                         ("on", "on", "on", {"hdmi2": "on"}, "off"))
+                         ("on", "off", "on", {"hdmi2": "on"}, "off"))   # AMD: FreeSync, not VRR
         self.assertEqual(public["adjustingLuminance"], [5] + [0] * 21)       # 2.5% +5
         # every internal write is followed by ENTER, as the G2 scripts do
         for i, call in enumerate(calls):
@@ -81,14 +81,33 @@ class Setup(unittest.TestCase):
         _missed, _text, calls = run(FakeClient(mode="hdrGame"))
         public, internal = sent(calls, "public"), sent(calls, "internal")
         self.assertEqual((public["hdrDynamicToneMapping"], public["contrast"], public["peakBrightness"],
-                          internal["freesync"], internal["gameOptimization"]), ("HGIG", "100", "high", "on", "on"))
+                          internal["freesync"], internal["gameOptimization"]), ("HGIG", "100", "high", "on", "off"))
         self.assertNotIn("adjustingLuminance", public)
         self.assertNotIn("pictureMode", internal)
 
-    def test_a_refused_or_kept_picture_setting_is_reported(self):
-        missed, _text, _calls = run(FakeClient(stored={"sharpness": "10"}, refuse={"blackLevel"}))
-        self.assertTrue(any(m.startswith("Video Range") for m in missed), missed)
+    def test_a_refused_picture_setting_takes_the_internal_route_and_a_kept_one_is_reported(self):
+        missed, _text, calls = run(FakeClient(stored={"sharpness": "10"}, refuse={"screenShift"}))
+        self.assertEqual(sent(calls, "internal")["screenShift"], "off")
         self.assertIn('Sharpness (the TV has "10")', missed)
+
+    def test_everything_on_the_sheet_is_sent(self):
+        _missed, _text, calls = run(FakeClient())
+        public, internal = sent(calls, "public"), sent(calls, "internal")
+        for key in ("tint", "filmMakerMode", "screenShift", "aspectRatio", "justScan"):
+            self.assertIn(key, public)
+        for key in ("oledCareMode", "lgLogoDisplay", "quickStartMode", "livePlus", "homeAutoLaunch",
+                    "gameGenre", "blackStabilizer", "whiteStabilizer", "lowLevelAdjustment", "darkMode",
+                    "blueLight", "enableALLM", "inputOptimization", "ai_Picture", "ai_Brightness", "ai_Genre"):
+            self.assertIn(key, internal)
+
+    def test_graphics_card_from_windows(self):
+        class Done:
+            def __init__(self, names):
+                self.stdout = names
+        for names, vendor in (("NVIDIA GeForce RTX 4080\nNVIDIA GeForce GT 710", "nvidia"),
+                              ("AMD Radeon RX 7900 XTX", "amd"),
+                              ("NVIDIA GeForce RTX 4080\nAMD Radeon(TM) Graphics", "")):
+            self.assertEqual(game.gpu_vendor(run=lambda *_a, **_k: Done(names)), vendor)
 
 
 def port_free(port: int) -> bool:
@@ -111,7 +130,8 @@ class RealLibrary(unittest.TestCase):
             pass                                     # the fake TV has no pointer-input socket
         said = []
         with mock.patch.object(WebOsClient, "button", enter):
-            missed = game.run("127.0.0.1", str(directory / "keys.sqlite"), 2, said.append, client_key=KEY)
+            missed = game.run("127.0.0.1", str(directory / "keys.sqlite"), 2, said.append, client_key=KEY,
+                              vendor=lambda: "amd")
         self.assertEqual(missed, [], "\n".join(said))
         self.assertEqual((tv.input, tv.devices["HDMI_2"]), ("HDMI_2", "pc.png"))
         other, picture = tv.settings["other"], tv.settings["picture"]

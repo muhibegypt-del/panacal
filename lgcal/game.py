@@ -13,15 +13,27 @@ import sys
 BLACK_LEVEL_KEYS = ("ntsc", "ntsc443", "pal", "pal60", "palm", "paln", "secam", "unknown")
 
 
-def game_settings(hdmi: int, hdr: bool) -> dict[str, dict]:
+def gpu_vendor(run=subprocess.run) -> str:
+    """'nvidia' or 'amd' when the PC's graphics cards are all one make, else ''."""
+    from .display import NO_WINDOW, powershell
+    try:
+        names = run([powershell(), "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"],
+                    capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW).stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    nvidia, amd = "nvidia" in names, "radeon" in names or "amd" in names
+    return "nvidia" if nvidia and not amd else "amd" if amd and not nvidia else ""
+
+
+def game_settings(hdmi: int, hdr: bool, gpu: str = "amd") -> dict[str, dict]:
     """The settings per route, as bscpylgtv's own G2 preset scripts send them
     (docs/guides/setting_presets): picture settings on the public route
     (set_system_settings), Game Optimizer ("other") and AI settings on the
-    internal route (set_settings) followed by ENTER. VRR & G-Sync and
-    FreeSync Premium both on. Video Range stays Auto (a PC sends full
-    range). SDR gets the sheet's 22-point tweak: +5 at 2.5%, the first of
-    the 22 points (2.5, 5, 7.5, 10, 15 ... 100)."""
-    vrr = freesync = "on"
+    internal route (set_settings) followed by ENTER. As the sheet says:
+    VRR & G-Sync for NVIDIA, FreeSync Premium for AMD. Video Range stays
+    Auto (a PC sends full range). SDR gets the sheet's 22-point tweak: +5
+    at 2.5%, the first of the 22 points (2.5, 5, 7.5, 10, 15 ... 100)."""
+    vrr, freesync = ("on", "off") if gpu == "nvidia" else ("off", "on")
     picture = {"energySaving": "off", "backlight": "100", "contrast": "100" if hdr else "85",
                "brightness": "50" if hdr else "49", "dynamicContrast": "off",
                "peakBrightness": "high" if hdr else "off", "gamma": "medium",          # 2.2
@@ -29,6 +41,8 @@ def game_settings(hdmi: int, hdr: bool) -> dict[str, dict]:
                "colorTemperature": "-45",                                              # Warm 45
                "sharpness": "0", "superResolution": "off", "noiseReduction": "off",
                "mpegNoiseReduction": "off", "smoothGradation": "off", "realCinema": "off",
+               "tint": "0", "filmMakerMode": "off",                                    # FILMMAKER Mode Auto Start
+               "screenShift": "off", "aspectRatio": "16x9",                            # Screen Move; 16:9
                "blackLevel": {k: "auto" for k in BLACK_LEVEL_KEYS}}
     if hdr:
         picture["hdrDynamicToneMapping"] = "HGIG"
@@ -43,7 +57,12 @@ def game_settings(hdmi: int, hdr: bool) -> dict[str, dict]:
                   "freesync": freesync, f"freesyncOLEDHDMI{hdmi}": freesync,
                   "inputOptimization": "on",                                           # Prevent Input Delay: Boost
                   "gameGenre": "Standard", "blackStabilizer": 10, "whiteStabilizer": 10,
-                  "lowLevelAdjustment": 0, "darkMode": "off", "blueLight": "off"},
+                  "lowLevelAdjustment": 0, "darkMode": "off", "blueLight": "off",
+                  "oledCareMode": "off",                                               # Care Picture Settings
+                  "lgLogoDisplay": "off"},                                             # Show logo when off
+        "aspectRatio": {"justScan": "on"},
+        "option": {"quickStartMode": "off", "livePlus": "off"},                         # Quick Start+, Live Plus
+        "general": {"homeAutoLaunch": "off"},
         "aiPicture": {"ai_Picture": "off", "ai_Brightness": "off", "ai_Genre": "off"},
     }
 
@@ -69,7 +88,8 @@ NAMES = {"gameMode": "Game Optimizer", "enableALLM": "ALLM", "inputOptimization"
          "sharpness": "Sharpness", "superResolution": "Super Resolution", "noiseReduction": "Noise Reduction",
          "mpegNoiseReduction": "MPEG Noise Reduction", "smoothGradation": "Smooth Gradation",
          "realCinema": "Real Cinema", "motionProOLED": "OLED Motion", "truMotionMode": "TruMotion",
-         "hdrDynamicToneMapping": "Dynamic Tone Mapping",
+         "hdrDynamicToneMapping": "Dynamic Tone Mapping", "tint": "Tint",
+         "filmMakerMode": "FILMMAKER Mode Auto Start", "screenShift": "Screen Move", "aspectRatio": "Aspect Ratio",
          "adjustingLuminance": "22-point tweak (2.5% +5)"}
 
 
@@ -103,7 +123,7 @@ async def internal(client, category: str, settings: dict, sleep) -> None:
     await sleep(1)
 
 
-async def setup(client, hdmi: int, say, sleep=asyncio.sleep) -> list[str]:
+async def setup(client, hdmi: int, say, gpu: str = "amd", sleep=asyncio.sleep) -> list[str]:
     """Send everything; return the picture settings the TV shows differently."""
     say(f"Switching the TV to HDMI {hdmi} ...")
     await client.set_input(f"HDMI_{hdmi}")
@@ -120,26 +140,31 @@ async def setup(client, hdmi: int, say, sleep=asyncio.sleep) -> list[str]:
         mode = await read(client, "picture", "pictureMode")
     hdr = mode == "hdrGame"
     say(f"Picture mode: {mode}. Sending the {'HDR' if hdr else 'SDR'} gaming settings ...")
-    sets = game_settings(hdmi, hdr)
-    refused = []
+    sets = game_settings(hdmi, hdr, gpu)
+    refused = {}
     try:
         await client.set_system_settings(category="picture", settings=sets["picture"])
     except Exception:                  # one key refused sinks the batch: send them one by one
         for key, value in sets["picture"].items():
             try:
                 await client.set_system_settings(category="picture", settings={key: value})
-            except Exception as exc:
-                refused.append(f"{name(key)} ({exc})")
+            except Exception:
+                refused[key] = value   # goes on the internal route below
     await sleep(1)
+    try:
+        await client.set_system_settings(category="aspectRatio", settings=sets["aspectRatio"])
+    except Exception:
+        await internal(client, "aspectRatio", sets["aspectRatio"], sleep)
     await client.set_system_settings(category="picture", settings={"truMotionMode": "off"}, current_app=True)
     await sleep(1)
-    for category, key in (("picture", "picture_internal"), ("other", "other"), ("aiPicture", "aiPicture")):
-        await internal(client, category, sets[key], sleep)
+    await internal(client, "picture", {**sets["picture_internal"], **refused}, sleep)
+    for category in ("other", "aiPicture", "option", "general"):
+        await internal(client, category, sets[category], sleep)
     await client.enable_tpc_or_gsr("tpc", False)                                   # OLED auto-dimming off
     await sleep(1)
     await client.enable_tpc_or_gsr("gsr", False)
     await sleep(2)
-    missed = refused + ([] if mode in ("game", "hdrGame") else [f"Game Optimizer (the TV is in {mode})"])
+    missed = [] if mode in ("game", "hdrGame") else [f"Game Optimizer (the TV is in {mode})"]
     for key, value in {**sets["picture"], "truMotionMode": "off"}.items():
         got = await read(client, "picture", key)
         if not isinstance(got, Exception) and not same(value, got):
@@ -147,9 +172,11 @@ async def setup(client, hdmi: int, say, sleep=asyncio.sleep) -> list[str]:
     return missed
 
 
-def run(ip: str, key_file: str, hdmi: int, say, client_key: str | None = None) -> list[str]:
+def run(ip: str, key_file: str, hdmi: int, say, client_key: str | None = None, vendor=gpu_vendor) -> list[str]:
     """bscpylgtv pairs itself, as bscpylgtvcommand does (the TV asks once to
     allow it), and keeps its key in key_file."""
+    gpu = vendor() or "amd"
+    say(f"Graphics: {gpu.upper() if gpu == 'amd' else 'NVIDIA'} (VRR & G-Sync for NVIDIA, FreeSync Premium for AMD)")
     ensure_bscpylgtv(say)
     from bscpylgtv import WebOsClient
 
@@ -160,7 +187,7 @@ def run(ip: str, key_file: str, hdmi: int, say, client_key: str | None = None) -
             say("The TV will ask to allow a connection (first time only): accept it with the remote.")
         await client.connect()
         try:
-            return await setup(client, hdmi, say)
+            return await setup(client, hdmi, say, gpu)
         finally:
             await client.disconnect()
     return asyncio.run(main())
