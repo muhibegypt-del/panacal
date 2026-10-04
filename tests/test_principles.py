@@ -468,10 +468,12 @@ class Cleanup(unittest.TestCase):
                     return {"status": "error", "message": "doesn't support the key(s): freesync"}
                 return {"status": "ok", "picture_settings": payload["settings"]}
         lg = FakeLG()
-        missed, out = quiet(app.setup_gaming, lg, 3, sleep=lambda _s: None)
-        self.assertEqual(missed, ["AMD FreeSync Premium"])
-        self.assertIn({"hdrDynamicToneMapping": "HGIG"}, [w["settings"] for w in lg.writes])
-        self.assertIn({"gameMode": {"hdmi3": "on"}}, [w["settings"] for w in lg.writes])
+        missed, out = quiet(app.setup_gaming, lg, 3, sleep=lambda _s: None, ask_input=lambda _p: "2")  # Xbox
+        self.assertEqual(missed, ["AMD FreeSync Premium on"])
+        written = [w["settings"] for w in lg.writes]
+        for wanted in ({"hdrDynamicToneMapping": "HGIG"}, {"gameMode": {"hdmi3": "on"}}, {"gameOptimization": "off"},
+                       {"contrast": "100"}, {"brightness": "50"}, {"peakBrightness": "high"}, {"color": "50"}):
+            self.assertIn(wanted, written)
         self.assertNotIn("run this again", out)
 
     def test_every_bat_the_messages_name_exists(self):

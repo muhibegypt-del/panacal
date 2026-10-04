@@ -865,19 +865,52 @@ def set_oled_dimming(lg: LG, ask_input=input) -> None:
         + ("On." if enable else "Off."))
 
 
-def game_settings(hdmi: int, hdr: bool) -> list[tuple[str, dict, str]]:
-    """The usual LG G2 gaming setup (RTINGS' G2 settings; key names and values
-    as ColorControl sends them): (category, settings, name on the TV)."""
-    other = [("other", {"gameMode": {f"hdmi{hdmi}": "on"}}, f"Game Optimizer on HDMI {hdmi}"),
-             ("other", {f"uhdDeepColorHDMI{hdmi}": "on"}, f"HDMI {hdmi} Ultra HD Deep Colour (4K 120 Hz, HDR)"),
-             ("other", {"enableALLM": "on"}, "Instant Game Response (ALLM)"),
-             ("other", {"gameOptimization": "on"}, "VRR & G-Sync"),
-             ("other", {"freesync": "on"}, "AMD FreeSync Premium"),
-             ("other", {"inputOptimization": "boost"}, "Prevent Input Delay: Boost")]
-    picture = [("picture", {"energySaving": "off"}, "Energy Saving off"),
-               ("picture", {"logoLuminanceAdjust": "light"}, "Adjust Logo Brightness: Low")]
+GAME_SOURCES = (("playstation", "PlayStation"), ("xbox", "Xbox"), ("nvidia", "PC with an NVIDIA graphics card"),
+                ("amd", "PC with an AMD graphics card"))
+# Settings P40L0's LG OLED sheet (v19) sets that need doing on the TV, because
+# their value format over the network is not documented.
+GAME_BY_HAND = ("Gamma 2.2", "Colour Temperature Warm 45", "Black Stabiliser 10 and White Stabiliser 10",
+                "Game Genre Standard", "Video Range Limited (with the console on Limited)")
+
+
+def game_settings(hdmi: int, hdr: bool, source: str = "playstation") -> list[tuple[str, dict, str]]:
+    """P40L0's optimized LG OLED gaming settings (TechOptimized sheet v19),
+    with key names and values as ColorControl sends them: (category,
+    settings, name on the TV). VRR & G-Sync is for PlayStation and NVIDIA,
+    FreeSync for Xbox and AMD."""
+    vrr = "on" if source in ("playstation", "nvidia") else "off"
+    freesync = "on" if source in ("xbox", "amd") else "off"
+    on = lambda key, value, name: ("other", {key: value}, name)
+    pic = lambda key, value, name: ("picture", {key: value}, name)
+    other = [on("gameMode", {f"hdmi{hdmi}": "on"}, f"Game Optimizer on HDMI {hdmi}"),
+             on(f"uhdDeepColorHDMI{hdmi}", "on", f"HDMI {hdmi} Ultra HD Deep Colour (4K)"),
+             on("enableALLM", "on", "ALLM (Instant Game Response)"),
+             on("gameOptimization", vrr, f"VRR & G-Sync {vrr}"),
+             on("freesync", freesync, f"AMD FreeSync Premium {freesync}"),
+             on("inputOptimization", "boost", "Prevent Input Delay: Boost"),
+             on("lowLevelAdjustment", "0", "Fine Tune Dark Areas 0"),
+             on("darkMode", "off", "Dark Room Mode off"),
+             on("blueLight", "off", "Reduce Blue Light off")]
+    picture = [pic("energySaving", "off", "Energy Saving off"),
+               pic("logoLuminanceAdjust", "off", "Adjust Logo Brightness off"),
+               pic("backlight", "100", "OLED Pixel Brightness 100"),
+               pic("contrast", "100" if hdr else "85", "Contrast " + ("100" if hdr else "85")),
+               pic("brightness", "50" if hdr else "49", "Black Level " + ("50" if hdr else "49")),
+               pic("dynamicContrast", "off", "Auto Dynamic Contrast off"),
+               pic("peakBrightness", "high" if hdr else "off", "Peak Brightness " + ("High" if hdr else "off")),
+               pic("color", "50" if hdr else "55", "Colour Depth " + ("50" if hdr else "55")),
+               pic("colorGamut", "auto", "Colour Gamut Auto Detect"),
+               pic("eyeComfortMode", "off", "Reduce Blue Light (Eye Comfort) off"),
+               pic("sharpness", "0", "Sharpness 0"),
+               pic("superResolution", "off", "Super Resolution off"),
+               pic("noiseReduction", "off", "Noise Reduction off"),
+               pic("mpegNoiseReduction", "off", "MPEG Noise Reduction off"),
+               pic("smoothGradation", "off", "Smooth Gradation off"),
+               pic("realCinema", "off", "Real Cinema off"),
+               pic("truMotionMode", "off", "TruMotion off"),
+               pic("motionProOLED", "off", "OLED Motion off")]
     if hdr:
-        picture.append(("picture", {"hdrDynamicToneMapping": "HGIG"}, "HDR tone mapping: HGIG"))
+        picture.append(pic("hdrDynamicToneMapping", "HGIG", "Dynamic Tone Mapping: HGIG"))
     return other + picture
 
 
@@ -887,10 +920,14 @@ def matches(wanted, got) -> bool:
     return str(got).lower() == str(wanted).lower()
 
 
-def setup_gaming(lg: LG, hdmi: int, sleep=time.sleep) -> list[str]:
+def setup_gaming(lg: LG, hdmi: int, sleep=time.sleep, ask_input=input) -> list[str]:
     """Game Optimizer and its settings on one HDMI input, through the same
     picture_set path calibration uses (each setting written, then read back).
     Returns the names of the settings the TV did not confirm."""
+    for number, (_key, name) in enumerate(GAME_SOURCES, 1):
+        say(f"  {number}. {name}")
+    source = GAME_SOURCES[choose_number(f"What plays on HDMI {hdmi}? Type its number: ", len(GAME_SOURCES),
+                                        ask_input)][0]
     say(f"Switching the TV to HDMI {hdmi} ...")
     switched = lg.switch_input(hdmi)
     if switched.get("status") != "ok":
@@ -908,14 +945,14 @@ def setup_gaming(lg: LG, hdmi: int, sleep=time.sleep) -> list[str]:
                 missed.append(name)
         return missed
 
-    items = game_settings(hdmi, hdr=False)
+    items = game_settings(hdmi, False, source)
     missed = apply([i for i in items if i[0] == "other"])
     sleep(2)                           # Game Optimizer switches the picture mode
     mode = lg.current_picture_mode()
     hdr = mode.lower().startswith("hdr")
     if mode not in ("game", "hdrGame"):
         say(f"  The TV is in picture mode '{mode or 'unknown'}', not Game Optimizer.")
-    missed += apply([i for i in game_settings(hdmi, hdr) if i[0] == "picture"])
+    missed += apply([i for i in game_settings(hdmi, hdr, source) if i[0] == "picture"])
     if not hdr:
         say("HDR games: HGIG is set per HDR mode, so start an HDR game on this input and run this again "
             "to set it. Then do the console's or game's own HDR calibration.")
@@ -936,6 +973,7 @@ def pair_or_undo(settings: dict, command: str) -> int:
                 missed = setup_gaming(lg, int(settings.get("game_hdmi") or 2))
                 say("Game setup done." if not missed else
                     "Game setup done, except: " + ", ".join(missed) + ". Set those on the TV by hand.")
+                say("Also set on the TV (Game Optimizer picture settings): " + "; ".join(GAME_BY_HAND) + ".")
             if command == "undo":
                 lg.clear_stale_calibration_mode()
                 mode = choose_picture_mode(lg, settings)
