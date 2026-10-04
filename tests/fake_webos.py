@@ -76,6 +76,7 @@ class FakeWebOS:
         self.sock.listen()
         self.log: list[str] = []
         self.payloads: dict[str, dict] = {}     # the last payload sent to each URI
+        self.alerts: list[dict] = []           # internal (luna://) calls sent through the alert bridge
         self.running = True
         threading.Thread(target=self._accept, daemon=True).start()
 
@@ -153,6 +154,12 @@ class FakeWebOS:
             conn.sendall(frame({"type": "response", "id": mid, "payload": {
                 "returnValue": True, "product_name": "webOSTV 6.0", "model_name": "HE_DTV_W21O_AFABATAA",
                 "major_ver": "03", "minor_ver": "20.00", "device_id": "aa:bb:cc:dd:ee:ff"}}))
+        elif uri == "ssap://system.notifications/createAlert":
+            self.alerts.append((message.get("payload") or {}).get("onclose") or {})
+            conn.sendall(frame({"type": "response", "id": mid, "payload": {
+                "returnValue": True, "alertId": f"com.webos.service.apiadapter.pub-{len(self.alerts)}"}}))
+        elif uri == "ssap://system.notifications/closeAlert":
+            conn.sendall(frame({"type": "response", "id": mid, "payload": {"returnValue": True}}))
         elif uri == "ssap://system.launcher/launch":
             conn.sendall(frame({"type": "response", "id": mid, "payload": {
                 "returnValue": True, "id": (message.get("payload") or {}).get("id")}}))

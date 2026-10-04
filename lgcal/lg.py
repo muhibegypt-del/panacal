@@ -668,6 +668,16 @@ class LG:
         return self.run_helper({"action": "remote_control", "ip": ip, "client_key": key, "command": menu,
                                 "connect_timeout": 5})
 
+    def oled_dimming(self, enable: bool) -> dict:
+        """Switch In-Start's TPC and GSR (the OLED auto-dimming of static
+        pictures) on or off. The TV acknowledges but cannot report the result."""
+        ready, error = self._ready({}, "changing the OLED dimming")
+        if error:
+            return error
+        _clients, ip, key = ready
+        return self.run_helper({"action": "remote_control", "ip": ip, "client_key": key,
+                                "command": "dimming_on" if enable else "dimming_off", "connect_timeout": 5})
+
     # --- pairing (used by the launcher) ------------------------------------
     def probe(self, ip: str) -> dict:
         return self.run_helper({"action": "probe", "ip": ip, "connect_timeout": 5})

@@ -48,6 +48,8 @@ Whenever a run stops, the last lines say why, what state the TV was left in (unt
 
 **LG Service Menu.bat** opens the TV's service menu (In-Start, or EZ Adjust) so you can make adjustments by hand with the remote. The password is usually 0413. Write down every value before you change it: LG AutoCal and Undo do not put service menu settings back, and a wrong value can damage the panel or void the warranty.
 
+**LG OLED Dimming.bat** switches off (or back on) the dimming LG OLEDs apply to a picture that stays still: TPC and GSR in the In-Start menu, without needing a service remote. It stops the screen fading on static content; it does not raise peak brightness, and it removes protection against burn-in. The TV cannot report these settings back, so check them afterwards in **LG Service Menu.bat** (In-Start, then OLED).
+
 Each run keeps everything in `sessions\<date_time>\`: `console.txt` (what the window showed), every reading and TV request, the worker's log and state, and `verification.json`.
 
 ## Optional overrides

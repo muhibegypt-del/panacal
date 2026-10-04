@@ -7039,6 +7039,13 @@ sub lg_remote_control_workflow (@) {
  } elsif($command eq "instart" || $command eq "ezadjust") { # PC-PORT: open a service menu (as bscpylgtv does)
   $response=&lg_request($session,"service_menu","system.launcher/launch",{ id => "com.webos.app.factorywin", params => { id => "executeFactory", irKey => ($command eq "ezadjust" ? "ezAdjust" : "inStart") } },$connect_timeout + 2); # PC-PORT
   $message="LG service menu opened."; # PC-PORT
+ } elsif($command eq "dimming_off" || $command eq "dimming_on") { # PC-PORT: In-Start TPC and GSR (as bscpylgtv's enable_tpc_or_gsr)
+  my $enable=&json_bool($command eq "dimming_on"); # PC-PORT
+  my $tpc=&lg_luna_request($session,"set_tpc","com.webos.service.oledepl/setTemporalPeakControl",{ enable => $enable },$connect_timeout + 2); # PC-PORT
+  my ($tpc_failed,$tpc_message)=&response_is_app_failure($tpc); # PC-PORT
+  $response=&lg_luna_request($session,"set_gsr","com.webos.service.oledepl/setGlobalStressReduction",{ enable => $enable },$connect_timeout + 2); # PC-PORT
+  $response={ type => "error", error => "TPC: ".($tpc_message||"no answer") } if($tpc_failed || ref($tpc) ne "HASH"); # PC-PORT
+  $message="LG TPC and GSR ".($command eq "dimming_on" ? "enabled." : "disabled."); # PC-PORT
  } elsif($command eq "active" || $command eq "input" || $command eq "switch_input") {
   my ($ok,$input_id,$responses)=&lg_switch_external_input($session,$connect_timeout + 2,$target_input);
   &websocket_close($session);

@@ -848,6 +848,23 @@ def open_service_menu(lg: LG, ask_input=input) -> None:
     say("Move with the arrow keys and OK; Back or Exit closes the menu.")
 
 
+def set_oled_dimming(lg: LG, ask_input=input) -> None:
+    """In-Start's TPC Enable and GSR Enable, without the service remote."""
+    say("LG OLEDs dim a picture that stays still for a while: TPC (Temporal Peak Luminance Control) and")
+    say("GSR (Global Sticky Reduction) in the In-Start service menu. Turning them off stops that dimming.")
+    say("It does not raise the TV's peak brightness, and it removes protection against burn-in.")
+    say("  1. Turn TPC and GSR off")
+    say("  2. Turn them back on (LG's setting)")
+    enable = choose_number("Type its number: ", 2, ask_input) == 1
+    result = lg.oled_dimming(enable)
+    if result.get("status") != "ok":
+        raise SystemExit(f"The TV did not take the change ({result.get('message') or 'no answer'}). If it says "
+                         "the key has no permission, run 'Pair LG TV.bat' first.")
+    say("Sent. Turn the TV off and on with the remote. The TV cannot report these two settings, so to check: "
+        "run 'LG Service Menu.bat', open In-Start, then OLED; TPC Enable and GSR Enable should read "
+        + ("On." if enable else "Off."))
+
+
 def pair_or_undo(settings: dict, command: str) -> int:
     with Session(suffix="_" + command) as session:
         try:
@@ -856,6 +873,8 @@ def pair_or_undo(settings: dict, command: str) -> int:
             find_tv(lg, settings, force_pairing=command == "pair")
             if command == "service":
                 open_service_menu(lg)
+            if command == "dimming":
+                set_oled_dimming(lg)
             if command == "undo":
                 lg.clear_stale_calibration_mode()
                 mode = choose_picture_mode(lg, settings)
@@ -878,16 +897,17 @@ def pair_or_undo(settings: dict, command: str) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="LG OLED AutoCal on a PC (PGenerator-Plus worker)")
-    parser.add_argument("command", nargs="?", default="run", choices=["run", "colour", "hdr", "pair", "undo", "service"],
+    parser.add_argument("command", nargs="?", default="run", choices=["run", "colour", "hdr", "pair", "undo", "service", "dimming"],
                         help="run (default): greyscale then colour; colour: only the colour stage, keeping "
                              "the greyscale in the TV; hdr: HDR10 greyscale and colour with madTPG patterns; "
                              "pair: find the TV and pair it again with a new PIN; "
                              "undo: clear the mode's white balance and LUTs; "
-                             "service: open the TV's service menu for adjustments by hand")
+                             "service: open the TV's service menu for adjustments by hand; "
+                             "dimming: switch the OLED auto-dimming (TPC and GSR) off or on")
     args = parser.parse_args(argv)
     console_click_proof()
     settings = load_settings()
-    if args.command in ("pair", "undo", "service"):
+    if args.command in ("pair", "undo", "service", "dimming"):
         return pair_or_undo(settings, args.command)
     if args.command == "colour":
         return run(settings, stages=("colour",))

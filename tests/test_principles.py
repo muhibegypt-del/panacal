@@ -444,6 +444,14 @@ class Cleanup(unittest.TestCase):
         self.assertIn("In-Start", str(stop.exception))
         self.assertIn("Pair LG TV.bat", str(stop.exception))
 
+    def test_a_refused_dimming_change_says_why(self):
+        class FakeLG:
+            def oled_dimming(self, enable):
+                return {"status": "error", "message": "401 insufficient permissions"}
+        with self.assertRaises(SystemExit) as stop:
+            quiet(app.set_oled_dimming, FakeLG(), lambda _p: "1")
+        self.assertIn("Pair LG TV.bat", str(stop.exception))
+
     def test_every_bat_the_messages_name_exists(self):
         import re
         root = Path(__file__).resolve().parent.parent
